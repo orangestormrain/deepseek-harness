@@ -200,3 +200,50 @@ export function openNativeTextFile(
 ): Promise<void> {
   return openNativePathWithIntent(path, signal, 'text-editor', internals)
 }
+
+/**
+ * Open one https URL with the system default browser. The URL is a caller-
+ * provided value by construction, so only `https:` is admitted: the browser
+ * hand-off itself is not a trust decision, but nothing here should ever be
+ * the one to hand a `file:`, `javascript:`, or scheme-less value to a
+ * desktop shell.
+ * @param url - absolute https URL to open.
+ * @param signal - caller/connection lifetime; abort terminates the native command.
+ * @param internals - Platform, environment, and runner hooks for deterministic tests.
+ */
+export async function openNativeUrl(
+  url: string,
+  signal: AbortSignal,
+  internals: PathOpenerInternals = {},
+): Promise<void> {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error(`native URL opener refuses an unparseable URL: ${url}`)
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`native URL opener refuses a non-https URL: ${url}`)
+  }
+  const platform = internals.platform ?? process.platform
+  const run = internals.run ?? runNativeCommand
+  if (platform === 'darwin') {
+    await run('open', [url], signal)
+    return
+  }
+  if (platform === 'win32') {
+    await run('powershell.exe', ['-NoProfile', '-Command', `Start-Process ${powershellLiteral(url)}`], signal)
+    return
+  }
+  if (platform === 'linux') {
+    if (isWsl(internals)) {
+      // No path translation: the URL is already a Windows-side value the
+      // Windows desktop browser resolves directly.
+      await run('powershell.exe', ['-NoProfile', '-Command', `Start-Process ${powershellLiteral(url)}`], signal)
+      return
+    }
+    await run('xdg-open', [url], signal)
+    return
+  }
+  throw new Error(`native URL opener is unsupported on ${platform}`)
+}

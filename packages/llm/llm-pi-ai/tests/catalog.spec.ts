@@ -145,6 +145,9 @@ describe('hand-declared providers', () => {
       // Nothing in the installed catalog answers for this route, which is what
       // configuration surfaces mark as a route this deployment declared.
       declared: true,
+      // The profile names a credential reference, so the route takes the key
+      // posture even though the catalog ships nothing for it.
+      auth: 'api_key',
     })
     // Membership of the catalog, not of the settings document: a shipped
     // provider carries a stored profile the moment anyone corrects it.
@@ -934,31 +937,31 @@ describe('configurable-provider directory', () => {
     expect(ctx.llm.listConfigurableProviders()).toHaveLength(catalogOnly)
   })
 
-  it('withholds a catalog route this adapter cannot authenticate', async () => {
+  it('offers OAuth-only catalog routes with their auth method declared', async () => {
     const ctx = await harness({})
-    const offered = ctx.llm.listConfigurableProviders().map(entry => entry.provider)
+    const offered = ctx.llm.listConfigurableProviders()
 
     // `openai-codex` is the one installed provider that authenticates through
-    // OAuth alone. pi-ai resolves OAuth only from a *stored* credential, this
-    // adapter constructs its collection with no credential store, and nothing
-    // here runs a login flow — so every request on such a route fails with
-    // `Provider is not configured` before it goes out. Offering it would put a
-    // provider on the settings page that no amount of configuration can make
-    // work.
-    expect(offered).not.toContain('openai-codex')
-    // A provider that offers OAuth *beside* an api-key method keeps its entry:
-    // the key is a path this adapter can serve.
-    expect(offered).toContain('anthropic')
-    expect(offered).toContain('openai')
+    // OAuth alone; the adapter's stored-credential seam and login flow are
+    // what make offering it honest. The directory's auth declaration is what
+    // tells a configuration surface to render a login card instead of a key
+    // field.
+    expect(offered).toContainEqual({
+      provider: 'openai-codex',
+      displayName: 'openai-codex',
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', 'openai-codex'],
+      declared: false,
+      auth: 'oauth',
+    })
+    // A provider that offers an api-key method — with or without OAuth beside
+    // it — keeps the key posture: a key always authenticates.
+    expect(offered.find(entry => entry.provider === 'openai')?.auth).toBe('api_key')
+    expect(offered.find(entry => entry.provider === 'anthropic')?.auth).toBe('api_key')
   })
 
-  it('still lists a withheld route a stored profile names, as a catalog route', async () => {
-    // Withholding the offer must not strand a profile someone already stored:
-    // the route keeps its entry so a configuration surface can edit or delete
-    // it, and `declared` still answers catalog membership rather than the
-    // offer, so the page does not mislabel it as a route this deployment
-    // invented.
-    const ctx = await harness({ providers: { 'openai-codex': { apiKeyEnv: KEY_ENV } } })
+  it('keeps the auth declaration when a stored profile names the route', async () => {
+    const ctx = await harness({ providers: { 'openai-codex': {} } })
 
     expect(ctx.llm.listConfigurableProviders()).toContainEqual({
       provider: 'openai-codex',
@@ -966,6 +969,17 @@ describe('configurable-provider directory', () => {
       settingsNs: 'llm-pi-ai',
       settingsPath: ['providers', 'openai-codex'],
       declared: false,
+      auth: 'oauth',
     })
+  })
+
+  it('reclassifies a repointed OAuth route as a key route when its profile names a credential', async () => {
+    // A profile can repoint a catalog route at a key (say, an OpenAI-compatible
+    // gateway serving the same models); the directory then follows the
+    // profile's reference, not the catalog's native method.
+    const ctx = await harness({ providers: { 'openai-codex': { apiKeyEnv: KEY_ENV } } })
+
+    expect(ctx.llm.listConfigurableProviders().find(entry => entry.provider === 'openai-codex')?.auth)
+      .toBe('api_key')
   })
 })

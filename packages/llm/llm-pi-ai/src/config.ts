@@ -176,6 +176,12 @@ export interface Config {
    * and registers them the moment a settings section supplies profiles.
    */
   providers?: Record<string, PiAiProviderProfile>
+  /**
+   * OS home whose `~/.codex/auth.json` is the external credential source for
+   * the `openai-codex` route (codex-cli's ChatGPT login). Defaults to the
+   * process home; a deployment that keeps codex state elsewhere names it.
+   */
+  oauthCodexHome?: string
 }
 
 const thinkingBudgets = z.object({
@@ -254,6 +260,7 @@ const profile = z.object({
 /** Runtime schema for {@link Config}. */
 export const Config: z<Config> = z.object({
   providers: z.dict(profile).default({}),
+  oauthCodexHome: z.string().role('path'),
 })
 
 /**

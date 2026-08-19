@@ -5,7 +5,14 @@
  * invalidation frames (settings/credentials/models changed).
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const { openNativeUrlMock } = vi.hoisted(() => ({ openNativeUrlMock: vi.fn() }))
+vi.mock('../src/native-path-opener.ts', async importOriginal => ({
+  ...(await importOriginal<typeof import('../src/native-path-opener.ts')>()),
+  openNativeUrl: openNativeUrlMock,
+}))
+
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -622,7 +629,8 @@ describe('llm domain', () => {
     const ctx = await harness({ configurableProviders: false })
     ctx.llm.registerConfigurableProviders([
       { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [] },
-      { provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'] },
+      { provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'], auth: 'api_key' },
+      { provider: 'openai-codex', displayName: 'OpenAI Codex', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai-codex'], auth: 'oauth' },
     ])
     ctx.llm.registerAdapter(['deepseek-official'], new CatalogAdapter('DeepSeek', ['deepseek-v4-flash']))
     ctx.llm.registerAdapter(['undeclared'], new CatalogAdapter('Undeclared', ['u-1']))
@@ -633,7 +641,8 @@ describe('llm domain', () => {
     const value = expectOk(await api.llm.providers(request({})))
     expect(value.providers).toEqual([
       { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [], active: true },
-      { provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'], active: false },
+      { provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'], active: false, auth: 'api_key' },
+      { provider: 'openai-codex', displayName: 'OpenAI Codex', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai-codex'], active: false, auth: 'oauth' },
       // An undeclared live route has no settings address, so nothing can be
       // interrogated on its behalf either.
       { provider: 'undeclared', displayName: 'Undeclared', settingsNs: '', settingsPath: [], active: true },
@@ -670,6 +679,179 @@ describe('llm domain', () => {
       { type: 'host/remote-event', event: 'llm/adapters-updated', args: [] },
     ])
   })
+})
+
+describe('llm OAuth domain', () => {
+  const PI_AI_NS = settingsNamespace('llm-pi-ai')
+
+  beforeEach(() => {
+    openNativeUrlMock.mockReset()
+  })
+
+  /** OAuth-capable adapter stub: records interactions, answers settled state. */
+  class OAuthCatalogAdapter extends CatalogAdapter {
+    readonly logins: unknown[] = []
+    readonly logouts: string[] = []
+    status: { connected: boolean; accountId?: string } = { connected: false }
+
+    override async login(_provider: string, interaction: import('@deepseek-ai/dsh-llm').LlmLoginInteraction): Promise<import('@deepseek-ai/dsh-llm').LlmLoginResult> {
+      this.logins.push(interaction)
+      interaction.notify({ type: 'auth_url', url: 'https://auth.openai.com/oauth/authorize?x=1' })
+      this.status = { connected: true, accountId: 'acct-1' }
+      return { accountId: 'acct-1' }
+    }
+
+    override async logout(provider: string): Promise<void> {
+      this.logouts.push(provider)
+      this.status = { connected: false }
+    }
+
+    override async oauthStatus(provider: string): Promise<import('@deepseek-ai/dsh-llm').LlmOAuthStatus> {
+      return this.status.connected
+        ? { provider, connected: true, ...this.status.accountId === undefined ? {} : { accountId: this.status.accountId } }
+        : { provider, connected: false }
+    }
+  }
+
+  /** The oauth-route composition: directory entry, adapter, and proxy. */
+  async function oauthHarness(): Promise<{ ctx: Context; api: ReturnType<typeof createApiProxy>; adapter: OAuthCatalogAdapter }> {
+    const ctx = await harness()
+    ctx.settings.register(PI_AI_NS, z.object({ providers: z.dict(z.object({})) }))
+    ctx.llm.registerConfigurableProviders([
+      { provider: 'openai-codex', displayName: 'OpenAI Codex', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai-codex'], auth: 'oauth' },
+    ])
+    const adapter = new OAuthCatalogAdapter('OpenAI Codex', [])
+    ctx.llm.registerAdapter(['openai-codex'], adapter)
+    return { ctx, api: createApiProxy(ctx, DEFAULTS), adapter }
+  }
+
+  it('starts a login flow, relays its events, and answers status without waiting for completion', async () => {
+    const { ctx, api, adapter } = await oauthHarness()
+    // Flow events ride the forwarded-event allowlist, exactly like the
+    // topology invalidation the llm domain test observed.
+    const frames = await collectHost(api, ['host/remote-event'], 2, async () => {
+      expectOk(await api.llm.login(request({ provider: 'openai-codex' })))
+      return Promise.resolve()
+    })
+    // The host handed the authorization URL to the system browser the moment
+    // the flow asked for it — the web page cannot, because the flow started
+    // on a wire call, not a user gesture.
+    expect(openNativeUrlMock).toHaveBeenCalledWith(
+      'https://auth.openai.com/oauth/authorize?x=1',
+      expect.any(AbortSignal),
+    )
+    expect(frames).toContainEqual({
+      type: 'host/remote-event',
+      event: 'llm/oauth-event',
+      args: ['openai-codex', { type: 'auth_url', url: 'https://auth.openai.com/oauth/authorize?x=1' }],
+    })
+    expect(frames).toContainEqual({
+      type: 'host/remote-event',
+      event: 'llm/oauth-event',
+      args: ['openai-codex', { type: 'complete', accountId: 'acct-1' }],
+    })
+    expect(adapter.logins).toHaveLength(1)
+
+    const value = expectOk(await api.llm.oauthStatus(request({})))
+    expect(value.providers).toEqual([{ provider: 'openai-codex', connected: true, accountId: 'acct-1' }])
+    // A named route answers even when it is not an oauth directory entry.
+    expect(expectOk(await api.llm.oauthStatus(request({ provider: 'deepseek-official' }))).providers)
+      .toEqual([{ provider: 'deepseek-official', connected: false }])
+    void ctx
+  })
+
+  it('enables an already-connected route without starting a flow', async () => {
+    const { api, adapter } = await oauthHarness()
+    // An adopted codex-cli login (or a previous sign-in) already holds a
+    // credential: `llm.login` then just activates the route — starting a flow
+    // would open an authorization page for an account that is already bound.
+    adapter.status = { connected: true, accountId: 'acct-1' }
+    expectOk(await api.llm.login(request({ provider: 'openai-codex' })))
+    expect(adapter.logins).toHaveLength(0)
+    expect(openNativeUrlMock).not.toHaveBeenCalled()
+    expect(expectOk(await api.llm.oauthStatus(request({ provider: 'openai-codex' }))).providers)
+      .toEqual([{ provider: 'openai-codex', connected: true, accountId: 'acct-1' }])
+  })
+
+  it('contains a failed browser hand-off so the login keeps running', async () => {
+    const { ctx, api } = await oauthHarness()
+    // No desktop reachable: the host warns and the page link remains the
+    // path forward, while the flow itself is untouched.
+    openNativeUrlMock.mockRejectedValue(new Error('no display'))
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+
+    expectOk(await api.llm.login(request({ provider: 'openai-codex' })))
+    await vi.waitFor(() => {
+      expect(warn).toHaveBeenCalledWith(
+        'llm login: could not open the authorization page for "openai-codex"; use the Models page link instead',
+      )
+    })
+    // The flow completed anyway and the status reads signed in.
+    expect(expectOk(await api.llm.oauthStatus(request({ provider: 'openai-codex' }))).providers)
+      .toEqual([{ provider: 'openai-codex', connected: true, accountId: 'acct-1' }])
+  })
+
+  it('activates a dormant oauth route by writing its minimal profile before the flow', async () => {
+    const ctx = await harness()
+    ctx.settings.register(PI_AI_NS, z.object({ providers: z.dict(z.object({})) }))
+    ctx.llm.registerConfigurableProviders([
+      { provider: 'openai-codex', displayName: 'OpenAI Codex', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai-codex'], auth: 'oauth' },
+    ])
+    const adapter = new OAuthCatalogAdapter('OpenAI Codex', [])
+    // The settings write is what registers the route, exactly as the settings
+    // watcher does in the product composition.
+    ctx.on('settings/document-updated', (ns) => {
+      if (ns === PI_AI_NS) ctx.llm.registerAdapter(['openai-codex'], adapter)
+    })
+    const api = createApiProxy(ctx, DEFAULTS)
+
+    expectOk(await api.llm.login(request({ provider: 'openai-codex' })))
+    expect(ctx.llm.listProviders().map(provider => provider.id)).toContain('openai-codex')
+    expect(adapter.logins).toHaveLength(1)
+  })
+
+  it('refuses OAuth operations that have nothing to act on', async () => {
+    const { api } = await oauthHarness()
+
+    const unknown = expectErr(await api.llm.login(request({ provider: 'absent' })))
+    expect(unknown.code).toBe('oauth-unknown-provider')
+
+    const noFlow = expectErr(await api.llm.loginInput(request({ provider: 'openai-codex', value: 'code' })))
+    expect(noFlow.code).toBe('oauth-no-active-login')
+
+    const noFlowCancel = expectErr(await api.llm.cancelLogin(request({ provider: 'openai-codex' })))
+    expect(noFlowCancel.code).toBe('oauth-no-active-login')
+
+    // A live flow with no pending prompt cannot be answered either.
+    expectOk(await api.llm.login(request({ provider: 'openai-codex' })))
+    const noPrompt = expectErr(await api.llm.loginInput(request({ provider: 'openai-codex', value: 'code' })))
+    expect(noPrompt.code).toBe('oauth-no-pending-prompt')
+
+    // Cancelling a live flow is a no-op that still answers.
+    expectOk(await api.llm.cancelLogin(request({ provider: 'openai-codex' })))
+  })
+
+  it('logs out by cancelling the flow and removing the credential', async () => {
+    const { api, adapter } = await oauthHarness()
+    expectOk(await api.llm.login(request({ provider: 'openai-codex' })))
+    expectOk(await api.llm.logout(request({ provider: 'openai-codex' })))
+    expect(adapter.logouts).toEqual(['openai-codex'])
+    expect(expectOk(await api.llm.oauthStatus(request({ provider: 'openai-codex' }))).providers)
+      .toEqual([{ provider: 'openai-codex', connected: false }])
+  })
+
+  it('reports a route that fails to register after its profile was written', async () => {
+    const ctx = await harness()
+    ctx.settings.register(PI_AI_NS, z.object({ providers: z.dict(z.object({})) }))
+    ctx.llm.registerConfigurableProviders([
+      { provider: 'openai-codex', displayName: 'OpenAI Codex', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai-codex'], auth: 'oauth' },
+    ])
+    // No adapter ever claims the route: the profile write cannot register it,
+    // and the login reports the route inactive after its bounded wait.
+    const api = createApiProxy(ctx, DEFAULTS)
+    const error = expectErr(await api.llm.login(request({ provider: 'openai-codex' })))
+    expect(error.code).toBe('oauth-provider-inactive')
+  }, 15_000)
 })
 
 describe('llm.discoverModels', () => {

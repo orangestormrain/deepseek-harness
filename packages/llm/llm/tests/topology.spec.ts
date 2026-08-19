@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmConfigurableProvider, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions,
+  LlmConfigurableProvider,
+  LlmLoginInteraction,
+  LlmLoginResult,
+  LlmOAuthStatus,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 
 class NoopAdapter extends LlmAdapter {
 
@@ -264,5 +271,94 @@ describe('model discovery registry', () => {
       .rejects.toMatchObject({ code: 'INVALID_DISCOVERY' })
     // Naming a route alone is enough: the adapter may know it without an endpoint.
     await expect(ctx.llm.discoverModels('llm-example', { provider: 'known-route' })).resolves.toEqual([])
+  })
+})
+
+describe('OAuth login seam', () => {
+  class OAuthAdapter extends LlmAdapter {
+    readonly logins: Array<{ provider: string; interaction: unknown }> = []
+    readonly logouts: string[] = []
+    override login = vi.fn(async (provider: string, interaction: LlmLoginInteraction): Promise<LlmLoginResult> => {
+      this.logins.push({ provider, interaction })
+      return { accountId: 'acct-1' }
+    })
+    override logout = vi.fn(async (provider: string): Promise<void> => { this.logouts.push(provider) })
+    override oauthStatus = vi.fn(async (provider: string): Promise<LlmOAuthStatus> => ({
+      provider, connected: true, accountId: 'acct-1', expiresAt: 1_800_000_000_000,
+    }))
+
+    async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+      throw new Error('not exercised')
+    }
+  }
+
+  it('dispatches login to the owning adapter and returns the disclosed outcome', async () => {
+    const ctx = await setup()
+    const adapter = new OAuthAdapter()
+    ctx.llm.registerAdapter(['openai-codex'], adapter)
+    const interaction: LlmLoginInteraction = {
+      notify: () => {},
+      prompt: () => Promise.resolve('browser'),
+    }
+    await expect(ctx.llm.login('openai-codex', interaction)).resolves.toEqual({ accountId: 'acct-1' })
+    expect(adapter.logins).toHaveLength(1)
+    expect(adapter.logins[0]?.interaction).toBe(interaction)
+  })
+
+  it('refuses login and logout on an adapter without an OAuth flow', async () => {
+    const ctx = await setup()
+    ctx.llm.registerAdapter(['keyed'], new NoopAdapter())
+    const interaction: LlmLoginInteraction = { notify: () => {}, prompt: () => Promise.resolve('') }
+    await expect(ctx.llm.login('keyed', interaction)).rejects.toMatchObject({ code: 'OAUTH_UNSUPPORTED' })
+    await expect(ctx.llm.logout('keyed')).rejects.toMatchObject({ code: 'OAUTH_UNSUPPORTED' })
+    // oauthStatus is a question with a negative answer rather than a fault.
+    await expect(ctx.llm.oauthStatus('keyed')).resolves.toEqual({ provider: 'keyed', connected: false })
+  })
+
+  it('refuses OAuth operations on a route no adapter owns', async () => {
+    const ctx = await setup()
+    const interaction: LlmLoginInteraction = { notify: () => {}, prompt: () => Promise.resolve('') }
+    await expect(ctx.llm.login('absent', interaction)).rejects.toMatchObject({ code: 'NO_ADAPTER' })
+    await expect(ctx.llm.logout('absent')).rejects.toMatchObject({ code: 'NO_ADAPTER' })
+    await expect(ctx.llm.oauthStatus('absent')).resolves.toEqual({ provider: 'absent', connected: false })
+  })
+
+  it('delegates logout and status to the owning adapter', async () => {
+    const ctx = await setup()
+    const adapter = new OAuthAdapter()
+    ctx.llm.registerAdapter(['openai-codex'], adapter)
+    await ctx.llm.logout('openai-codex')
+    expect(adapter.logouts).toEqual(['openai-codex'])
+    await expect(ctx.llm.oauthStatus('openai-codex')).resolves.toEqual({
+      provider: 'openai-codex',
+      connected: true,
+      accountId: 'acct-1',
+      expiresAt: 1_800_000_000_000,
+    })
+  })
+
+  it('detaches and validates adapter-returned login and status facts', async () => {
+    const ctx = await setup()
+    class BrokenAdapter extends OAuthAdapter {
+      override login = vi.fn(async (): Promise<LlmLoginResult> => ({ accountId: 42 as never }))
+      override oauthStatus = vi.fn(async (_provider: string): Promise<LlmOAuthStatus> => ({
+        provider: 'other-route',
+        connected: true,
+      }))
+    }
+    const adapter = new BrokenAdapter()
+    ctx.llm.registerAdapter(['openai-codex'], adapter)
+    const interaction: LlmLoginInteraction = { notify: () => {}, prompt: () => Promise.resolve('') }
+    await expect(ctx.llm.login('openai-codex', interaction)).rejects.toMatchObject({ code: 'INVALID_OAUTH_RESULT' })
+    await expect(ctx.llm.oauthStatus('openai-codex')).rejects.toMatchObject({ code: 'INVALID_OAUTH_STATUS' })
+  })
+
+  it('carries the auth method through the configurable-provider directory', async () => {
+    const ctx = await setup()
+    ctx.llm.registerConfigurableProviders([
+      entry({ auth: 'api_key' }),
+      entry({ provider: 'openai-codex', displayName: 'OpenAI Codex', auth: 'oauth' }),
+    ])
+    expect(ctx.llm.listConfigurableProviders().map(entry_ => entry_.auth)).toEqual(['api_key', 'oauth'])
   })
 })

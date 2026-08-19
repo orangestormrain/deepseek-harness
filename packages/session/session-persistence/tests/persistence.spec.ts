@@ -101,6 +101,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
     return this.coordinator.append(id, events)
   }
 
+  delete(id: SessionId): Promise<void> {
+    return this.coordinator.delete(id)
+  }
+
   override prepare(id: SessionId, signal?: AbortSignal): ReturnType<PersistenceCoordinator['prepare']> {
     return this.coordinator.prepare(id, signal)
   }
@@ -134,6 +138,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
   async readStoredRevision(id: SessionId): Promise<SessionPersistenceRevision | undefined> {
     const entry = this.store.get(id)
     return entry === undefined ? undefined : memoryRevision(entry)
+  }
+
+  async deleteStored(id: SessionId): Promise<boolean> {
+    return this.store.delete(id)
   }
 
   async appendBatch(m: SessionHeader, events: readonly SessionEvent[], _isMaterialized: boolean): Promise<void> {
@@ -209,6 +217,10 @@ class ControlledBackend implements PersistenceBackend<never> {
     signal?.throwIfAborted()
     const entry = this.store.get(id)
     return entry === undefined ? undefined : memoryRevision(entry)
+  }
+
+  async deleteStored(id: SessionId): Promise<boolean> {
+    return this.store.delete(id)
   }
 
   async appendBatch(m: SessionHeader, events: readonly SessionEvent[], _isMaterialized: boolean): Promise<void> {

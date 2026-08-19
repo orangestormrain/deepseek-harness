@@ -6,7 +6,7 @@
 import { z } from 'zod'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
-import type { ConfigurableProviderView, DiscoveredModelView } from './llm.ts'
+import type { ConfigurableProviderView, DiscoveredModelView, OAuthStatusView } from './llm.ts'
 import { modelCatalogFailureSchema, modelProviderGroupSchema } from './sessions.schema.ts'
 
 /** ConfigurableProviderView row of llm.providers. */
@@ -17,6 +17,7 @@ export const configurableProviderViewSchema = z.object({
   settingsPath: z.array(z.string()),
   active: z.boolean(),
   declared: z.boolean().optional(),
+  auth: z.enum(['api_key', 'oauth']).optional(),
 }) satisfies z.ZodType<Wire<ConfigurableProviderView>>
 
 /** llm.providers request payload. */
@@ -62,3 +63,54 @@ export const llmDiscoverModelsRequestSchema = z.object({
 export const llmDiscoverModelsValueSchema = z.object({
   models: z.array(discoveredModelViewSchema),
 }) satisfies z.ZodType<Wire<ResponseValue<'llm.discoverModels'>>>
+
+/** OAuthStatusView row of llm.oauthStatus. */
+export const oauthStatusViewSchema = z.object({
+  provider: z.string().min(1),
+  connected: z.boolean(),
+  accountId: z.string().min(1).optional(),
+  expiresAt: z.number().positive().optional(),
+}) satisfies z.ZodType<Wire<OAuthStatusView>>
+
+/** llm.login request payload. */
+export const llmLoginRequestSchema = z.object({
+  provider: z.string().min(1),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.login'>>>
+
+/** llm.login response value. */
+export const llmLoginValueSchema = z.object({}) satisfies z.ZodType<Wire<ResponseValue<'llm.login'>>>
+
+/** llm.loginInput request payload. */
+export const llmLoginInputRequestSchema = z.object({
+  provider: z.string().min(1),
+  value: z.string().min(1),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.loginInput'>>>
+
+/** llm.loginInput response value. */
+export const llmLoginInputValueSchema = z.object({}) satisfies z.ZodType<Wire<ResponseValue<'llm.loginInput'>>>
+
+/** llm.cancelLogin request payload. */
+export const llmCancelLoginRequestSchema = z.object({
+  provider: z.string().min(1),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.cancelLogin'>>>
+
+/** llm.cancelLogin response value. */
+export const llmCancelLoginValueSchema = z.object({}) satisfies z.ZodType<Wire<ResponseValue<'llm.cancelLogin'>>>
+
+/** llm.logout request payload. */
+export const llmLogoutRequestSchema = z.object({
+  provider: z.string().min(1),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.logout'>>>
+
+/** llm.logout response value. */
+export const llmLogoutValueSchema = z.object({}) satisfies z.ZodType<Wire<ResponseValue<'llm.logout'>>>
+
+/** llm.oauthStatus request payload. */
+export const llmOauthStatusRequestSchema = z.object({
+  provider: z.string().min(1).optional(),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.oauthStatus'>>>
+
+/** llm.oauthStatus response value. */
+export const llmOauthStatusValueSchema = z.object({
+  providers: z.array(oauthStatusViewSchema),
+}) satisfies z.ZodType<Wire<ResponseValue<'llm.oauthStatus'>>>

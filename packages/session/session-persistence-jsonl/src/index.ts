@@ -9,7 +9,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { readdirSync } from 'node:fs'
-import { open, mkdir, readFile, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readFile, readdir, realpath, link, rm, rmdir, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -112,6 +112,12 @@ function isENOENT(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT'
 }
 
+/** Whether a directory-removal error means another artifact still occupies it. */
+function isDirectoryNotEmpty(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOTEMPTY' || code === 'EEXIST'
+}
+
 /**
  * The JSONL persistence backend. Load as a plugin; it registers as
  * `ctx.sessionPersistence` and (via the coordinator) installs the write-path
@@ -181,6 +187,10 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return this.coordinator.append(id, events)
   }
 
+  delete(id: SessionId): Promise<void> {
+    return this.coordinator.delete(id)
+  }
+
   override prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
     return this.coordinator.prepare(id, signal)
   }
@@ -234,6 +244,37 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       if (isENOENT(error)) return undefined
       throw error
     }
+  }
+
+  /**
+   * Permanently unlink one session artifact and remove its empty directory.
+   * @param id - session identity to remove.
+   * @returns whether an artifact existed and was removed.
+   */
+  async deleteStored(id: SessionId): Promise<boolean> {
+    await this.ensureRootEncoding()
+    const path = await this.findLog(id)
+    if (path === undefined) return false
+    try {
+      await rm(path)
+    } catch (error: unknown) {
+      if (isENOENT(error)) return false
+      throw error
+    }
+    const directory = dirname(path)
+    /* v8 ignore next -- native Windows deletion is committed by the filesystem close path. */
+    if (process.platform !== 'win32') await this.syncDirPosix(directory)
+    try {
+      // rmdir never follows a link-shaped directory entry; an unexpected link
+      // therefore fails loud instead of widening deletion beyond one artifact.
+      await rmdir(directory)
+    } catch (error: unknown) {
+      if (!isENOENT(error) && !isDirectoryNotEmpty(error)) throw error
+      return true
+    }
+    /* v8 ignore next -- native Windows deletion is committed by the filesystem close path. */
+    if (process.platform !== 'win32') await this.syncDirPosix(dirname(directory))
+    return true
   }
 
   /**

@@ -18,8 +18,9 @@ import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
 import { CustomProviderCard } from './CustomProviderCard.tsx'
+import { OAuthCard } from './OAuthCard.tsx'
 import { deriveKeyRef, messageOf, protocolChoices, providerUsable } from './store.ts'
-import type { ModelsSettingsState, ModelsSettingsStore, ProviderRow } from './store.ts'
+import type { ModelsSettingsState, ModelsSettingsStore, OAuthFlowState, ProviderRow } from './store.ts'
 import { ProviderEditor, type ProviderEditorProps } from './ProviderEditor.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -163,6 +164,31 @@ export function providerCopy(template: string, target: ProviderIdentity): string
   return template.replace('{provider}', () => providerTargetLabel(target))
 }
 
+/** Render the OAuth card for one oauth-authenticated provider row. */
+function renderOAuthCard(
+  row: ProviderRow,
+  controller: ModelsSettingsStore,
+  flow: OAuthFlowState,
+  readOnly: boolean,
+  t: ModelsSectionInjected['t'],
+): ReactNode {
+  return (
+    <OAuthCard
+      displayName={row.entry.displayName}
+      connected={row.oauth?.connected === true}
+      active={row.entry.active}
+      {...row.oauth?.accountId === undefined ? {} : { accountId: row.oauth.accountId }}
+      flow={flow}
+      readOnly={readOnly}
+      t={t}
+      onLogin={() => { void controller.login(row.entry.provider) }}
+      onLogout={() => { void controller.logout(row.entry.provider) }}
+      onCancel={() => { void controller.cancelLogin(row.entry.provider) }}
+      onManualCode={(value) => { void controller.loginInput(row.entry.provider, value) }}
+    />
+  )
+}
+
 /**
  * Render the Models section content column.
  * @param props - slot-delivered injected dependencies.
@@ -289,6 +315,22 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
           const namespace = state.namespaces.get(target.settingsNs)
           /* v8 ignore next -- the join marks a row configured only when its namespace resolved */
           if (namespace === undefined) return null
+          // An oauth route never renders the key editor: its credential comes
+          // from the login flow, so the card is the whole row in both the
+          // setup and the ordinary posture.
+          if (row.entry.auth === 'oauth') {
+            return (
+              <li key={row.entry.provider} className={styles['oauthRow']}>
+                {renderOAuthCard(
+                  row,
+                  controller,
+                  state.oauthFlows[row.entry.provider] ?? { status: 'idle' },
+                  !state.writable,
+                  t,
+                )}
+              </li>
+            )
+          }
           if (needsSetup(row, anyUsable) && !dismissedSetup.has(row.entry.provider)) {
             // First-run posture: the provider exists but has no key — the
             // setup card IS its presence on the page, until the user closes it.
@@ -413,18 +455,33 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   ))}
                 </select>
               </div>
-              <ProviderEditor
-                key={addTarget.provider}
-                provider={addTarget.provider}
-                displayName={addTarget.displayName}
-                hideTitle
-                namespace={addNamespace}
-                settingsPath={addTarget.settingsPath}
-                api={api}
-                t={t}
-                readOnly={!state.writable}
-                onClose={(changed) => { closeEditor(changed, addTarget) }}
-              />
+              {/* An oauth route being added has no key to enter: the login card
+                  is its whole editor. */}
+              {(() => {
+                const addRow = addable.find(candidate => candidate.entry.provider === addTarget.provider)
+                return addRow?.entry.auth === 'oauth'
+                  ? renderOAuthCard(
+                    addRow,
+                    controller,
+                    state.oauthFlows[addRow.entry.provider] ?? { status: 'idle' },
+                    !state.writable,
+                    t,
+                  )
+                  : (
+                    <ProviderEditor
+                      key={addTarget.provider}
+                      provider={addTarget.provider}
+                      displayName={addTarget.displayName}
+                      hideTitle
+                      namespace={addNamespace}
+                      settingsPath={addTarget.settingsPath}
+                      api={api}
+                      t={t}
+                      readOnly={!state.writable}
+                      onClose={(changed) => { closeEditor(changed, addTarget) }}
+                    />
+                  )
+              })()}
             </div>
           )
           : declaring

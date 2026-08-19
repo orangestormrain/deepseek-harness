@@ -99,6 +99,38 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
       }
     })
 
+    it('permanently deletes a materialized log and permits deliberate id reuse', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const m = meta('deleted-materialized')
+        await persistence.create(m)
+        await persistence.append(m.id, oneTurnLog())
+
+        await persistence.delete(m.id)
+
+        expect((await persistence.list()).map(header => header.id)).not.toContain(m.id)
+        await expect(persistence.load(m.id)).rejects.toThrow()
+        await persistence.create(m)
+        await persistence.append(m.id, oneTurnLog())
+        await expect(persistence.load(m.id)).resolves.toMatchObject({ meta: { id: m.id } })
+      } finally {
+        await dispose()
+      }
+    })
+
+    it('cancels an unmaterialized create intent and rejects an unknown identity', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const m = meta('deleted-intent')
+        await persistence.create(m)
+        await expect(persistence.delete(m.id)).resolves.toBeUndefined()
+        await expect(persistence.delete(SessionId('never-created'))).rejects.toThrow('not found')
+        await persistence.create(m)
+      } finally {
+        await dispose()
+      }
+    })
+
     it('rejects a fractional creation timestamp without reserving its session id', async () => {
       const { persistence, dispose } = await make()
       try {

@@ -18,6 +18,14 @@ Choose **Add provider**, select a provider such as Anthropic or OpenAI, enter it
 
 Providers with native authentication need their native credentials instead. Bedrock, Vertex, Azure, and Codex use AWS credentials and a region, an ADC project, an `api-version`, and OAuth respectively; filling only the API-key field does not configure them.
 
+## Sign in with an OAuth account
+
+A provider that authenticates through OAuth alone — Codex (ChatGPT) is the one the installed catalog ships — is configured by signing in with your account instead of a key. Choose **Add provider**, select **OpenAI Codex**, and click **登录 OpenAI 账号**. The sign-in page opens in your browser automatically; the card shows progress and a cancel control while the flow runs, and the signed-in account once it completes. A device-code flow and a paste-the-code fallback appear when the browser flow cannot finish on its own.
+
+If you already signed ChatGPT in through the official Codex CLI (`codex login`), the route adopts that account directly — the card shows it as signed in without any flow.
+
+The account credential is stored in `$DSH_HOME/.oauth.json` (owner-only) and refreshed automatically on later requests. **退出登录** removes it and stops the adoption of a Codex CLI login; the provider route itself remains configured until you delete it.
+
 ## Add a custom provider
 
 Choose **Add a custom provider** for a company gateway, self-hosted server, or provider absent from the installed catalog. Supply a lowercase Provider ID, base URL, API protocol, credential, and at least one model.

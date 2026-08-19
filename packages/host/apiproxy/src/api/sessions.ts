@@ -370,4 +370,15 @@ export interface SessionsApi {
    */
   cancel(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ accepted: true }>>
 
+  /**
+   * Permanently deletes an archived session log. A target with descendants
+   * rejects unless `recursive` is true; recursive deletion commits leaves
+   * before their ancestors. Running sessions and attached sessions not owned by
+   * this gateway reject. The response lists every deleted identity.
+   * @param request - archived root id and descendant-deletion policy.
+   * @returns deleted identities in commit order, or a stable business error.
+   */
+  delete(request: RpcRequest<{ sessionId: SessionId; recursive?: boolean }>):
+  Promise<RpcResponse<{ deletedSessionIds: SessionId[] }>>
+
 }

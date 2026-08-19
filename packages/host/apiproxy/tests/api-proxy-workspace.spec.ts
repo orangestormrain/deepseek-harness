@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentFactory } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
@@ -75,7 +75,17 @@ async function harness(
   const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', storageDomain)
   ctx.provide('storageDomain', storageDomain)
-  ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+  const persistedHeaders: SessionHeader[] = []
+  const persistence = {
+    list: () => Promise.resolve([...persistedHeaders]),
+    delete: vi.fn(async (id: SessionHeader['id']) => {
+      const index = persistedHeaders.findIndex(header => header.id === id)
+      if (index < 0) throw new Error(`session "${id}" not found`)
+      persistedHeaders.splice(index, 1)
+      ctx.emit('session-persistence/deleted', id)
+    }),
+  }
+  ctx.provide('sessionPersistence', persistence as never)
   await ctx.plugin(WorkspaceRegistry)
 
   const factory: AgentFactory = {
@@ -108,7 +118,7 @@ async function harness(
     ...extras.openPath === undefined ? {} : { openPath: extras.openPath },
     ...extras.canOpenPath === undefined ? {} : { canOpenPath: extras.canOpenPath },
   })
-  return { api, ctx, storageDomain, root }
+  return { api, ctx, storageDomain, root, persistedHeaders, persistence }
 }
 
 /** Stage one directory under the harness root for path adoption. */
@@ -566,5 +576,76 @@ describe('Host Workspace increments', () => {
       error: { code: 'session-not-found', details: { sessionId: 'session-ghost' } },
     })
     abort.abort()
+  })
+
+  it('restores an archived session and installs the full updated set', async () => {
+    const { api, root } = await harness()
+    const sessionId = SessionId('session-to-restore')
+    expectOk(await api.sessions.create(request({ cwd: root, sessionId })))
+    await api.workspace.archiveSession(request({ sessionId }))
+    expect(expectOk(await api.workspace.unarchiveSession(request({ sessionId }))).archivedSessionIds)
+      .toEqual([])
+    expect(expectOk(await api.workspace.list(request({}))).archivedSessionIds).toEqual([])
+  })
+
+  it('rejects running and non-gateway-owned attached sessions', async () => {
+    const runningHarness = await harness()
+    const runningId = SessionId('session-delete-running')
+    expectOk(await runningHarness.api.sessions.create(request({ cwd: runningHarness.root, sessionId: runningId })))
+    runningHarness.persistedHeaders.push(runningHarness.ctx.sessions.get(runningId)?.header as SessionHeader)
+    await runningHarness.api.workspace.archiveSession(request({ sessionId: runningId }))
+    const runningAgent = runningHarness.ctx.agents.get(runningId) as Agent & { status: 'idle' | 'running' }
+    runningAgent.status = 'running'
+    const running = await runningHarness.api.sessions.delete(request({ sessionId: runningId, recursive: true }))
+    expect(running.result).toMatchObject({
+      ok: false,
+      error: { code: 'agent-busy', details: { reason: 'SESSION_RUNNING' } },
+    })
+
+    const foreignHarness = await harness()
+    const foreignId = SessionId('session-delete-foreign')
+    const foreign = foreignHarness.ctx.sessions.create(foreignId, { meta: { cwd: foreignHarness.root } })
+    foreignHarness.persistedHeaders.push(foreign.header)
+    await foreignHarness.api.workspace.archiveSession(request({ sessionId: foreignId }))
+    const nonOwned = await foreignHarness.api.sessions.delete(request({ sessionId: foreignId, recursive: true }))
+    expect(nonOwned.result).toMatchObject({
+      ok: false,
+      error: { code: 'agent-busy', details: { reason: 'SESSION_NOT_OWNED' } },
+    })
+  })
+
+  it('requires archive state and recursively deletes cold descendants bottom-up', async () => {
+    const { api, root, persistedHeaders, persistence } = await harness()
+    const rootId = SessionId('session-delete-root')
+    const childId = SessionId('session-delete-child')
+    const grandchildId = SessionId('session-delete-grandchild')
+    persistedHeaders.push(
+      { version: 0, id: rootId, createdAt: 1, cwd: root },
+      { version: 0, id: childId, createdAt: 2, cwd: root, parentSession: rootId },
+      { version: 0, id: grandchildId, createdAt: 3, cwd: root, parentSession: childId },
+    )
+
+    const notArchived = await api.sessions.delete(request({ sessionId: rootId, recursive: true }))
+    expect(notArchived.result).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-archived', details: { sessionId: rootId } },
+    })
+    await api.workspace.archiveSession(request({ sessionId: rootId }))
+
+    const hasDescendants = await api.sessions.delete(request({ sessionId: rootId }))
+    expect(hasDescendants.result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'session-has-descendants',
+        details: { sessionId: rootId, descendantSessionIds: [grandchildId, childId] },
+      },
+    })
+    expect(persistence.delete).not.toHaveBeenCalled()
+
+    const deleted = expectOk(await api.sessions.delete(request({ sessionId: rootId, recursive: true })))
+    expect(deleted.deletedSessionIds).toEqual([grandchildId, childId, rootId])
+    expect(persistence.delete.mock.calls.map(([id]) => id)).toEqual([grandchildId, childId, rootId])
+    expect(persistedHeaders).toEqual([])
+    expect(expectOk(await api.workspace.list(request({}))).archivedSessionIds).toEqual([])
   })
 })

@@ -29,6 +29,24 @@ export interface ConfigurableProviderView {
    * surface must treat absence as "unknown", not as "shipped".
    */
   declared?: boolean
+  /**
+   * The authentication method the route's adapter resolves, when it states
+   * one: `oauth` routes render a login affordance, `api_key` routes the key
+   * field. Absent means the adapter draws no such distinction.
+   */
+  auth?: 'api_key' | 'oauth'
+}
+
+/** Wire view of one provider route's durable OAuth state. */
+export interface OAuthStatusView {
+  /** Provider route key. */
+  provider: string
+  /** Whether the adapter holds a stored OAuth credential for the route. */
+  connected: boolean
+  /** Provider-side account identifier disclosed by the login flow. */
+  accountId?: string
+  /** Epoch milliseconds at which the stored access token expires. */
+  expiresAt?: number
 }
 
 /** Llm-domain unary methods (the map keys llm.* of RpcMethodMap). */
@@ -74,6 +92,56 @@ export interface LlmApi {
     }>,
     signal?: AbortSignal,
   ): Promise<RpcResponse<{ models: DiscoveredModelView[] }>>
+
+  /**
+   * Start (or restart) the OAuth login flow for one provider route. The flow
+   * runs in the host and can take minutes (the user completes it in a
+   * browser), so the call returns once the flow has started; progress and
+   * prompts ride the forwarded `llm/oauth-event` host event, and a pending
+   * manual-code prompt is answered through `llm.loginInput`. An OAuth route
+   * that is not yet registered gets its minimal profile written first, so the
+   * login itself activates it.
+   */
+  login(
+    request: RpcRequest<{ provider: string }>,
+  ): Promise<RpcResponse<{}>>
+
+  /**
+   * Answer a pending manual-code prompt of the live login flow for one
+   * provider route with the value the user pasted (an authorization code or
+   * the redirect URL).
+   */
+  loginInput(
+    request: RpcRequest<{ provider: string; value: string }>,
+  ): Promise<RpcResponse<{}>>
+
+  /**
+   * Cancel the live login flow for one provider route without touching a
+   * stored credential: a flow the user abandons leaves whatever was already
+   * logged in alone.
+   */
+  cancelLogin(
+    request: RpcRequest<{ provider: string }>,
+  ): Promise<RpcResponse<{}>>
+
+  /**
+   * Cancel the live login flow for one provider route and remove its stored
+   * OAuth credential. Cancelling a flow that is not running is a no-op;
+   * removing a credential that is not stored is a no-op.
+   */
+  logout(
+    request: RpcRequest<{ provider: string }>,
+  ): Promise<RpcResponse<{}>>
+
+  /**
+   * Report the durable OAuth state of every OAuth-authenticated configurable
+   * provider, or of one named provider. The answer is local (the stored
+   * credential); whether the credential still works is only answerable at
+   * request time.
+   */
+  oauthStatus(
+    request: RpcRequest<{ provider?: string }>,
+  ): Promise<RpcResponse<{ providers: OAuthStatusView[] }>>
 }
 
 /** Wire view of one model an interrogated endpoint advertises. */

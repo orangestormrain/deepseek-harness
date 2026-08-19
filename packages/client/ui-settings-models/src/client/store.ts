@@ -1,13 +1,14 @@
 /**
  * Models settings page store: one snapshot joining the configurable-provider
  * directory (`llm.providers`), the settings namespaces (`settings.describe`),
- * and the referenced credentials (`credentials.describe`). The host stays the
- * single fact source — every mutation writes through the wire and the page
- * re-renders from the next describe, pushed or refetched.
+ * the referenced credentials (`credentials.describe`), and the OAuth login
+ * state (`llm.oauthStatus` + the forwarded `llm/oauth-event` stream). The
+ * host stays the single fact source — every mutation writes through the wire
+ * and the page re-renders from the next describe, pushed or refetched.
  */
 
 import type {
-  ConfigurableProviderView, CredentialView, IApiClient, SettingsNamespaceView,
+  ConfigurableProviderView, CredentialView, IApiClient, LlmOAuthEvent, OAuthStatusView, SettingsNamespaceView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
@@ -31,7 +32,32 @@ export interface ProviderRow {
   apiKeyEnv: string | undefined
   /** Credential state for {@link apiKeyEnv}, once described. */
   credential: CredentialView | undefined
+  /** Durable OAuth state for an oauth-authenticated route, once described. */
+  oauth?: OAuthStatusView
 }
+
+/**
+ * One provider route's login-flow state as the page sees it: what the host
+ * relayed through `llm/oauth-event` since the flow started. `idle` covers
+ * both "never started" and "finished" (the finished flow is removed on its
+ * `complete` event).
+ */
+export type OAuthFlowState =
+  | { status: 'idle' }
+  | { status: 'starting' }
+  | {
+    status: 'waiting'
+    /** Browser-login authorization URL, when the flow opened one. */
+    url?: string
+    instructions?: string
+    /** Device-code login code, when the flow is a device flow. */
+    deviceCode?: string
+    verificationUri?: string
+    /** Manual-code prompt copy, when the flow is waiting for pasted input. */
+    manualMessage?: string
+    manualPlaceholder?: string
+  }
+  | { status: 'error'; message: string }
 
 /** Page snapshot. */
 export interface ModelsSettingsState {
@@ -40,12 +66,16 @@ export interface ModelsSettingsState {
   error: string | null
   /** Credential enrichment failure; provider/settings rows remain usable. */
   credentialError: string | null
+  /** OAuth status enrichment failure; rows keep their last known state. */
+  oauthError: string | null
   /** Whether the settings provider accepts writes. */
   writable: boolean
   /** Every configurable provider joined with its configured/credential state. */
   rows: readonly ProviderRow[]
   /** Namespace views by ns, for the editor's schema/layers/secrets. */
   namespaces: ReadonlyMap<string, SettingsNamespaceView>
+  /** Login-flow state by provider route. */
+  oauthFlows: Readonly<Record<string, OAuthFlowState>>
 }
 
 /**
@@ -99,7 +129,8 @@ function apiKeyEnvOf(namespace: SettingsNamespaceView | undefined, path: readonl
 export class ModelsSettingsStore {
   /** The snapshot the section renders from (uSES-safe store). */
   readonly store: SnapshotStore<ModelsSettingsState> = createSnapshotStore<ModelsSettingsState>({
-    status: 'idle', error: null, credentialError: null, writable: false, rows: [], namespaces: new Map(),
+    status: 'idle', error: null, credentialError: null, oauthError: null, writable: false, rows: [],
+    namespaces: new Map(), oauthFlows: {},
   })
 
   /** Latest load wins; an older response never overwrites a newer one. */
@@ -111,9 +142,11 @@ export class ModelsSettingsStore {
   constructor(private readonly api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>) {}
 
   /**
-   * Refresh the whole page snapshot: directory and namespaces in parallel,
-   * then one batched credential describe over every referenced ref. A
-   * failure keeps the last good rows and surfaces the error.
+   * Refresh the whole page snapshot: directory, namespaces, and OAuth status
+   * in parallel, then one batched credential describe over every referenced
+   * ref. OAuth status is an enrichment like credentials: neither a business
+   * rejection nor a transport failure fails the load — the oauth rows just
+   * read disconnected, with the failure surfaced on the page.
    * @returns nothing; the snapshot carries the outcome.
    */
   async load(): Promise<void> {
@@ -140,6 +173,17 @@ export class ModelsSettingsStore {
       })
       return
     }
+    let oauthStatus: OAuthStatusView[] | undefined
+    let oauthError: string | null = null
+    try {
+      const oauthResponse = await this.api.llm.oauthStatus({})
+      if (oauthResponse.result.ok) oauthStatus = oauthResponse.result.value.providers
+      else oauthError = oauthResponse.result.error.message
+    } catch (error) {
+      oauthError = messageOf(error)
+    }
+    if (generation !== this.generation) return
+    const statusByProvider = new Map((oauthStatus ?? []).map(status => [status.provider, status]))
     const namespaces = new Map(views.map(view => [view.ns, view]))
     const rows: ProviderRow[] = providers.map((entry) => {
       const namespace = namespaces.get(entry.settingsNs)
@@ -149,12 +193,14 @@ export class ModelsSettingsStore {
         && entry.settingsPath.length > 0
         && hasPath(namespace.user, entry.settingsPath)
         && !hasPath(namespace.base, entry.settingsPath)
+      const oauth = statusByProvider.get(entry.provider)
       return {
         entry,
         configured,
         removable,
         apiKeyEnv: apiKeyEnvOf(namespace, entry.settingsPath),
         credential: undefined,
+        ...oauth === undefined ? {} : { oauth },
       }
     })
     const refs = [...new Set(rows.flatMap(row => row.apiKeyEnv === undefined ? [] : [row.apiKeyEnv]))]
@@ -177,6 +223,7 @@ export class ModelsSettingsStore {
       s.status = 'ready'
       s.error = null
       s.credentialError = credentialError
+      s.oauthError = oauthError
       s.writable = writable
       s.rows = rows.map(row => ({
         ...row,
@@ -187,12 +234,125 @@ export class ModelsSettingsStore {
       s.namespaces = namespaces
     })
   }
+
+  /** Replace one route's flow state, keeping every other route's untouched. */
+  private setFlow(provider: string, flow: OAuthFlowState): void {
+    this.store.update((s) => {
+      s.oauthFlows = { ...s.oauthFlows, [provider]: flow }
+    })
+  }
+
+  /**
+   * Fold one forwarded `llm/oauth-event` into the page snapshot. A completed
+   * flow refreshes the whole page (the host may have written the route's
+   * profile and stored its credential); everything else just updates the
+   * flow panel.
+   * @param provider - the provider route the event belongs to.
+   * @param event - the relayed flow step.
+   */
+  handleOAuthEvent(provider: string, event: LlmOAuthEvent): void {
+    switch (event.type) {
+      case 'auth_url':
+        this.setFlow(provider, {
+          status: 'waiting',
+          url: event.url,
+          ...event.instructions === undefined ? {} : { instructions: event.instructions },
+        })
+        return
+      case 'device_code':
+        this.setFlow(provider, {
+          status: 'waiting',
+          deviceCode: event.userCode,
+          verificationUri: event.verificationUri,
+        })
+        return
+      case 'manual_code':
+        this.setFlow(provider, {
+          status: 'waiting',
+          manualMessage: event.message,
+          ...event.placeholder === undefined ? {} : { manualPlaceholder: event.placeholder },
+        })
+        return
+      case 'progress':
+        // Progress keeps whatever the flow is waiting on; the message is the
+        // waiting copy's companion, and the state union has no seat for it.
+        return
+      case 'info':
+        return
+      case 'complete':
+        this.setFlow(provider, { status: 'idle' })
+        void this.load()
+        return
+      case 'error':
+        this.setFlow(provider, { status: 'error', message: event.message })
+        return
+    }
+  }
+
+  /**
+   * Start the host login flow for one provider route. The flow itself runs in
+   * the host and may take minutes; progress arrives through
+   * {@link handleOAuthEvent}.
+   * @param provider - oauth-authenticated provider route to log into.
+   */
+  async login(provider: string): Promise<void> {
+    this.setFlow(provider, { status: 'starting' })
+    try {
+      const response = await this.api.llm.login({ provider })
+      if (!response.result.ok) throw new Error(response.result.error.message)
+    } catch (error) {
+      this.setFlow(provider, { status: 'error', message: messageOf(error) })
+    }
+  }
+
+  /**
+   * Answer the live flow's manual-code prompt with the value the user pasted.
+   * @param provider - provider route whose flow is waiting for input.
+   * @param value - pasted authorization code or redirect URL.
+   */
+  async loginInput(provider: string, value: string): Promise<void> {
+    try {
+      const response = await this.api.llm.loginInput({ provider, value })
+      if (!response.result.ok) throw new Error(response.result.error.message)
+    } catch (error) {
+      this.setFlow(provider, { status: 'error', message: messageOf(error) })
+    }
+  }
+
+  /**
+   * Cancel the live login flow without touching a stored credential.
+   * @param provider - provider route whose flow to cancel.
+   */
+  async cancelLogin(provider: string): Promise<void> {
+    try {
+      const response = await this.api.llm.cancelLogin({ provider })
+      if (!response.result.ok) throw new Error(response.result.error.message)
+    } catch (error) {
+      this.setFlow(provider, { status: 'error', message: messageOf(error) })
+    }
+    this.setFlow(provider, { status: 'idle' })
+  }
+
+  /**
+   * Remove the stored OAuth credential of one provider route and refresh.
+   * @param provider - oauth-authenticated provider route to sign out of.
+   */
+  async logout(provider: string): Promise<void> {
+    try {
+      const response = await this.api.llm.logout({ provider })
+      if (!response.result.ok) throw new Error(response.result.error.message)
+    } catch (error) {
+      this.setFlow(provider, { status: 'error', message: messageOf(error) })
+    }
+    await this.load()
+  }
 }
 
 /**
  * Whether a joined row can serve model requests as it stands: the route is
  * registered with the adapter registry, and whatever credential its resolved
- * profile names is stored. A profile naming no reference authenticates through
+ * profile names is stored. An oauth route is usable when its stored
+ * credential is present; a profile naming no reference authenticates through
  * the provider's own path (the Bedrock chain, Vertex ADC, a gateway that needs
  * nothing), as does a live route with no settings address at all, so neither
  * owes this page a key.
@@ -201,6 +361,7 @@ export class ModelsSettingsStore {
  */
 export function providerUsable(row: ProviderRow): boolean {
   if (!row.entry.active) return false
+  if (row.entry.auth === 'oauth') return row.oauth?.connected === true
   if (row.apiKeyEnv === undefined) return true
   return row.credential?.configured === true
 }

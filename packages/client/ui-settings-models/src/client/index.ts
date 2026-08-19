@@ -96,7 +96,8 @@ export function apply(ctx: ClientContext): void {
   })
 
   // Pushed invalidations converge every open surface without polling: any
-  // settings/credentials/topology change refetches once the page loaded.
+  // settings/credentials/topology change refetches once the page loaded, and
+  // login-flow steps fold into the page store as they arrive.
   ctx.effect(() => {
     const refreshModels = (): void => { refreshIfLoaded(controller) }
     const refreshAll = (): void => {
@@ -110,6 +111,9 @@ export function apply(ctx: ClientContext): void {
       }),
       ctx.remote.$on('credentials/updated', refreshModels),
       ctx.remote.$on('llm/adapters-updated', refreshModels),
+      ctx.remote.$on('llm/oauth-event', (provider, event) => {
+        controller.handleOAuthEvent(provider, event)
+      }),
       ctx.on('connection/reset', refreshAll),
     ]
     return () => { for (const dispose of disposers) dispose() }

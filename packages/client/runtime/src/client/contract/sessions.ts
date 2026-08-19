@@ -96,6 +96,14 @@ export interface ISessions {
    */
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId>
   /**
+   * Permanently delete an archived session and, when requested, its lineage
+   * descendants.
+   * @param sessionId - archived root session.
+   * @param recursive - whether to include descendants.
+   * @returns deleted identities in commit order.
+   */
+  delete(sessionId: SessionId, recursive: boolean): Promise<readonly SessionId[]>
+  /**
    * Register a per-session standard-props provider (hooks become `use<Name>`
    * selector hooks on the render side; props spread verbatim).
    * @param descriptor - static member roster plus per-session resolver.

@@ -55,6 +55,12 @@
   gap: 8px;
 }
 
+/* OAuth rows reuse the rowCard chrome their card renders; the wrapper only
+   strips the list marker the page's other rows also drop. */
+.oauthRow {
+  list-style: none;
+}
+
 /* A configured provider: outlined on the panel fill, so the filled editor
    card it expands into reads as the nested object. */
 .rowCard {
@@ -601,6 +607,68 @@ select.input {
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-state-error-primary);
+}
+
+/* OAuth card: the signed-in account line, the in-flow panel, and its pieces.
+   The flow panel reads as the page's progress area: module fill like the
+   editors, stacked facts, and the cancel affordance as a quiet link. */
+.oauthStatus {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.oauthFlow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-module-platform);
+  padding: 12px 14px;
+}
+
+.oauthHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+.oauthCode {
+  font-family: var(--ds-font-family-code);
+  font-size: 14px;
+  line-height: 22px;
+  padding: 4px 8px;
+  border: 1px dashed var(--dsw-alias-border-l3);
+  border-radius: 6px;
+  color: var(--dsw-alias-label-primary);
+  letter-spacing: 0.06em;
+}
+
+.oauthLink {
+  color: var(--dsw-alias-brand-primary);
+  font-size: 12px;
+  line-height: 18px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.oauthLink:hover {
+  text-decoration: underline;
+}
+
+.oauthManualRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.oauthManualRow .input {
+  flex: 1 1 auto;
 }
 
 .deleteDialog {

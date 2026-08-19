@@ -121,6 +121,9 @@ export class FakeApiClient implements IApiClient {
     attachment: (payload: unknown) => this.record('session.attachment', payload, this.onAttachment(payload)),
     updateQueue: (payload: unknown) => this.record('session.updateQueue', payload, this.onUpdateQueue(payload)),
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
+    delete: (payload: unknown) => this.record('session.delete', payload, Promise.resolve(ok({
+      deletedSessionIds: [(payload as { sessionId: SessionId }).sessionId],
+    }))),
   }
 
   readonly subagents: IApiClient['subagents'] = {
@@ -166,6 +169,9 @@ export class FakeApiClient implements IApiClient {
     }))),
     archiveSession: (payload: unknown) => this.record('workspace.archiveSession', payload, Promise.resolve(ok({
       archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId],
+    }))),
+    unarchiveSession: (payload: unknown) => this.record('workspace.unarchiveSession', payload, Promise.resolve(ok({
+      archivedSessionIds: [],
     }))),
   }
 
@@ -222,6 +228,11 @@ export class FakeApiClient implements IApiClient {
     providers: payload => this.record('llm.providers', payload, Promise.resolve(ok({ providers: [] }))),
     models: payload => this.record('llm.models', payload, Promise.resolve(ok({ groups: [], failures: [] }))),
     discoverModels: payload => this.record('llm.discoverModels', payload, Promise.resolve(ok({ models: [] }))),
+    login: payload => this.record('llm.login', payload, Promise.resolve(ok({}))),
+    loginInput: payload => this.record('llm.loginInput', payload, Promise.resolve(ok({}))),
+    cancelLogin: payload => this.record('llm.cancelLogin', payload, Promise.resolve(ok({}))),
+    logout: payload => this.record('llm.logout', payload, Promise.resolve(ok({}))),
+    oauthStatus: payload => this.record('llm.oauthStatus', payload, Promise.resolve(ok({ providers: [] }))),
   }
 
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */

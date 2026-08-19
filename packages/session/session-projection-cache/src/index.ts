@@ -85,6 +85,11 @@ export class SessionProjectionCache extends Service {
     const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
     this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
+    this.ctx.on('session-persistence/deleted', (sessionId) => {
+      void this.requireTable().delete(sessionId).catch((error: unknown) => {
+        this.ctx.logger.warn(`session-projection-cache: failed to remove deleted session '${sessionId}': ${String(error)}`)
+      })
+    })
     this.installWritePath()
   }
 

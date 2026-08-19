@@ -34,6 +34,7 @@ export interface RpcMethodMap {
   'session.attachment': SessionsApi['attachment']
   'session.updateQueue': SessionsApi['updateQueue']
   'session.cancel': SessionsApi['cancel']
+  'session.delete': SessionsApi['delete']
   'subagent.list': SubagentsApi['list']
   'subagent.history': SubagentsApi['history']
   'subagent.prompt': SubagentsApi['prompt']
@@ -50,6 +51,7 @@ export interface RpcMethodMap {
   'workspace.insertBefore': WorkspaceApi['insertBefore']
   'workspace.insertSessionBefore': WorkspaceApi['insertSessionBefore']
   'workspace.archiveSession': WorkspaceApi['archiveSession']
+  'workspace.unarchiveSession': WorkspaceApi['unarchiveSession']
   'skill.list': SkillsApi['list']
   'agentPreset.list': AgentPresetsApi['list']
   'agentPreset.select': AgentPresetsApi['select']
@@ -74,6 +76,11 @@ export interface RpcMethodMap {
   'llm.providers': LlmApi['providers']
   'llm.models': LlmApi['models']
   'llm.discoverModels': LlmApi['discoverModels']
+  'llm.login': LlmApi['login']
+  'llm.loginInput': LlmApi['loginInput']
+  'llm.cancelLogin': LlmApi['cancelLogin']
+  'llm.logout': LlmApi['logout']
+  'llm.oauthStatus': LlmApi['oauthStatus']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

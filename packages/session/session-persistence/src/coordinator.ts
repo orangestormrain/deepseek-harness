@@ -184,6 +184,15 @@ export interface PersistenceBackend<TornMarker = unknown> {
   appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void>
 
   /**
+   * Permanently remove one materialized session. Returns false when no stored
+   * artifact exists. The coordinator serializes this call with every same-id
+   * append and owns all in-memory state invalidation.
+   * @param id - Session identity to remove.
+   * @returns whether a materialized session was deleted.
+   */
+  deleteStored(id: SessionId): Promise<boolean>
+
+  /**
    * Make a crash repair durable: truncate the torn tail (iff
    * `tornMarker !== undefined`) and append `closers` (iff any). NOT required to
    * be atomic — a file backend may truncate-then-append in two fsync'd steps.
@@ -707,6 +716,41 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     state.materialized = true
     state.cursor += events.length
     this.preparations.invalidate(id)
+  }
+
+  /**
+   * Permanently delete one stored session or cancel its unmaterialized create
+   * intent. The same-id chain is the commit barrier against appends.
+   * @param id - Session identity to delete.
+   */
+  async delete(id: SessionId): Promise<void> {
+    return this.serialize(id, async () => {
+      if (this.ctx.sessions.get(id) !== undefined) {
+        throw new Error(`cannot delete session "${id}" while it is live`)
+      }
+      this.preparations.assertWritable(id)
+      const state = this.states.get(id)
+      if (state !== undefined && !state.materialized) {
+        this.states.delete(id)
+        this.preparations.invalidate(id)
+        this.emitDeleted(id)
+        return
+      }
+      const deleted = await this.backend.deleteStored(id)
+      if (!deleted) throw new Error(`session "${id}" not found`)
+      this.states.delete(id)
+      this.preparations.invalidate(id)
+      this.emitDeleted(id)
+    })
+  }
+
+  /** Contain observers after the irreversible backend delete commit. */
+  private emitDeleted(id: SessionId): void {
+    try {
+      this.ctx.emit('session-persistence/deleted', id)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`session "${id}": session-persistence/deleted listener failed: ${String(error)}`)
+    }
   }
 
   /**

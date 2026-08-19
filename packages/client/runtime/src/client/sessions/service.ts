@@ -532,6 +532,19 @@ export class SessionRuntime implements ISessions {
   }
 
   /**
+   * Permanently delete an archived session and optionally its descendants.
+   * @param sessionId - archived root session.
+   * @param recursive - whether descendants are included.
+   * @returns deleted identities in commit order.
+   */
+  async delete(sessionId: SessionId, recursive: boolean): Promise<readonly SessionId[]> {
+    const result = await this.manager.delete(sessionId, recursive)
+    if (!result.ok) throw new Error(`session delete failed: ${result.error.code}: ${result.error.message}`)
+    this.projectList()
+    return result.value.deletedSessionIds
+  }
+
+  /**
    * Resolve an Agent-scoped context view (use-and-discard).
    * @param id - session id (the agent identity — 1:1 same axis).
    * @returns scoped ctx, or undefined for a session neither listed nor already scoped.

@@ -46,9 +46,11 @@ function state(overrides: Partial<ModelsSettingsState> = {}): ModelsSettingsStat
     status: 'ready',
     error: null,
     credentialError: null,
+    oauthError: null,
     writable: true,
     rows: [row()],
     namespaces: new Map(),
+    oauthFlows: {},
     ...overrides,
   }
 }

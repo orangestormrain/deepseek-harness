@@ -420,6 +420,105 @@ interface LlmConfigurableProvider {
    * from outside.
    */
   declared?: boolean
+  /**
+   * The authentication method the route's adapter resolves, when the adapter
+   * states one. `oauth` marks a route whose provider authenticates through a
+   * stored OAuth credential obtained by a login flow (a ChatGPT account, for
+   * instance) rather than an API key, so configuration surfaces can render
+   * the right setup affordance. Absent means the adapter draws no such
+   * distinction and the surface defaults to its key posture.
+   */
+  auth?: 'api_key' | 'oauth'
+}
+```
+
+其路由以 OAuth 认证（账号而非密钥）的适配器，还会实现 seam 的登录操作。交互对象与 pi-ai 的 OAuth 流程驱动的是同一套 prompt/event 词汇（结构同构），适配器无需转换即可透传；流程步骤经 `llm/oauth-event` 宿主事件到达各界面。
+
+```ts type-equiv
+/**
+ * One prompt a login flow addresses to its host. `select` asks for an option
+ * id; `manual_code` asks the user to paste an authorization code or redirect
+ * URL after completing login in a browser; `text` and `secret` ask for a
+ * free-form or hidden value.
+ */
+type LlmLoginPrompt = {
+  signal?: AbortSignal
+} & (
+    | {
+      type: 'select'
+      message: string
+      options: readonly { id: string; label: string; description?: string }[]
+    }
+    | { type: 'text' | 'secret' | 'manual_code'; message: string; placeholder?: string }
+  )
+```
+
+```ts type-equiv
+/**
+ * One login-flow progress event, JSON-safe for host-to-client forwarding.
+ * `auth_url` invites the user to complete login in a browser; `device_code`
+ * shows a code to enter at the verification URI; `manual_code` opens a prompt
+ * the host should surface for the user to paste the authorization code or
+ * redirect URL into; `complete` announces the flow finished.
+ */
+type LlmOAuthEvent =
+  | { type: 'info'; message: string; links?: readonly { url: string; label?: string }[] }
+  | { type: 'auth_url'; url: string; instructions?: string }
+  | {
+    type: 'device_code'
+    userCode: string
+    verificationUri: string
+    intervalSeconds?: number
+    expiresInSeconds?: number
+  }
+  | { type: 'progress'; message: string }
+  | { type: 'manual_code'; message: string; placeholder?: string }
+  | { type: 'complete'; accountId?: string }
+  | { type: 'error'; message: string }
+```
+
+```ts type-equiv
+/**
+ * Host-side interaction surface a login flow drives: the flow asks the host
+ * to answer prompts (auto-answer, forward to a user, or refuse) and to relay
+ * progress events to whatever surface started it. Structural mirror of the
+ * interaction pi-ai's OAuth flows drive, so an adapter passes one through
+ * without translation.
+ */
+interface LlmLoginInteraction {
+  /** Abort the whole flow; implementations reject their pending prompt. */
+  signal?: AbortSignal
+  /** Answer one prompt; rejects on cancellation or when the host cannot answer. */
+  prompt(prompt: LlmLoginPrompt): Promise<string>
+  /** Relay one progress event. */
+  notify(event: LlmOAuthEvent): void
+}
+```
+
+```ts type-equiv
+/** The outcome of a completed login flow. */
+interface LlmLoginResult {
+  /** Provider-side account identifier disclosed by the flow, when it has one. */
+  accountId?: string
+}
+```
+
+```ts type-equiv
+/**
+ * Durable OAuth state of one provider route, for status surfaces: whether a
+ * credential is stored, and what the stored credential discloses. Whether the
+ * credential still *works* is only answerable at request time (token refresh
+ * happens under the provider lock on the first request that needs it).
+ */
+interface LlmOAuthStatus {
+  /** Provider route the status answers for. */
+  provider: string
+  /** Whether the adapter holds a stored OAuth credential for the route. */
+  connected: boolean
+  /** Provider-side account identifier disclosed by the login flow. */
+  accountId?: string
+  /** Epoch milliseconds at which the stored access token expires. */
+  expiresAt?: number
 }
 ```
 
@@ -733,6 +832,32 @@ declare abstract class LlmAdapter {
    * @returns the chunk stream, obeying the adapter contract documented on `StreamChunk`.
    */
   abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
+  /**
+   * Run the provider-owned OAuth login flow for one owned route and persist
+   * the returned credential. Absent on adapters whose routes authenticate
+   * through API keys alone; the runtime refuses with `OAUTH_UNSUPPORTED`
+   * before reaching the adapter.
+   * @param provider - one provider route owned by this adapter.
+   * @param interaction - host-owned prompt/notify surface the flow drives.
+   * @returns the outcome the flow disclosed, after the credential is durable.
+   */
+  login?(provider: string, interaction: LlmLoginInteraction): Promise<LlmLoginResult>;
+  /**
+   * Remove the stored OAuth credential of one owned route. Absent on adapters
+   * whose routes authenticate through API keys alone; the runtime refuses
+   * with `OAUTH_UNSUPPORTED` before reaching the adapter.
+   * @param provider - one provider route owned by this adapter.
+   */
+  logout?(provider: string): Promise<void>;
+  /**
+   * Report the durable OAuth state of one owned route without refreshing or
+   * contacting the provider. Absent on adapters whose routes authenticate
+   * through API keys alone, and for routes no adapter owns; the runtime
+   * answers `connected: false` for both.
+   * @param provider - one provider route.
+   * @returns the stored-credential status for the route.
+   */
+  oauthStatus?(provider: string): Promise<LlmOAuthStatus>;
 }
 ```
 
@@ -816,6 +941,37 @@ async discoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, ): 
 providerRetryPolicy(provider: string): ResolvedRetryPolicy
 
 /**
+ * Run the provider-owned OAuth login flow for one registered route and
+ * persist its credential. The flow drives the caller-supplied interaction
+ * and may take minutes; the route must already be registered (an adapter
+ * owns it) for the flow to have a provider to log into.
+ * @param provider - registered provider route whose adapter owns the flow.
+ * @param interaction - host-owned prompt/notify surface the flow drives.
+ * @returns the outcome the flow disclosed, after the credential is durable.
+ * @throws `LlmError` `NO_ADAPTER` for an unknown route, `OAUTH_UNSUPPORTED`
+ *   when the owning adapter has no login flow.
+ */
+async login(provider: string, interaction: LlmLoginInteraction): Promise<LlmLoginResult>
+
+/**
+ * Remove the stored OAuth credential of one registered route.
+ * @param provider - registered provider route whose credential to remove.
+ * @throws `LlmError` `NO_ADAPTER` for an unknown route, `OAUTH_UNSUPPORTED`
+ *   when the owning adapter holds no OAuth credential store.
+ */
+async logout(provider: string): Promise<void>
+
+/**
+ * Report the durable OAuth state of one route. A route no adapter owns, or
+ * whose adapter keeps no OAuth credential store, answers `connected: false`
+ * rather than failing: the question is "is there a stored credential", and
+ * an absent owner is a negative answer, not a fault.
+ * @param provider - provider route to inspect.
+ * @returns the stored-credential status for the route.
+ */
+async oauthStatus(provider: string): Promise<LlmOAuthStatus>
+
+/**
  * Discover models advertised by one registered provider. Catalog membership
  * is advisory and never changes routing or request validation.
  * @param provider - registered provider route to inspect.
@@ -870,7 +1026,7 @@ async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<Prepared
 stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 ```
 
-Source: [`packages/llm/llm/src/index.ts:284`](../../packages/llm/llm/src/index.ts)
+Source: [`packages/llm/llm/src/index.ts:316`](../../packages/llm/llm/src/index.ts)
 
 <a id="llm-events"></a>
 
@@ -897,6 +1053,27 @@ The provider topology changed: an adapter registered or unregistered routes, or 
 
 Source: [`packages/llm/llm/src/types.ts:23`](../../packages/llm/llm/src/types.ts)
 
+<a id="llmoauth-event--emit"></a>
+
+#### `llm/oauth-event` — emit
+
+One OAuth login-flow step for one provider route: a progress or prompt event the host's login interaction relayed, for surfaces to display and, for the `manual_code` variant, to answer through LlmRuntime.loginInput. Payloads are JSON-safe by construction.
+
+```ts cordis-catalog
+/**
+ * One OAuth login-flow step for one provider route: a progress or prompt
+ * event the host's login interaction relayed, for surfaces to display and,
+ * for the `manual_code` variant, to answer through
+ * {@link LlmRuntime.loginInput}. Payloads are JSON-safe by construction.
+ * @param provider - the provider route whose flow produced the event.
+ * @param event - the flow step.
+ * @mode emit
+ */
+'llm/oauth-event'(provider: string, event: LlmOAuthEvent): void
+```
+
+Source: [`packages/llm/llm/src/types.ts:33`](../../packages/llm/llm/src/types.ts)
+
 <a id="llmstream--waterfall"></a>
 
 #### `llm/stream` — waterfall
@@ -919,5 +1096,5 @@ Waterfall around every streaming model call (retry, replay, routing). Bound to t
 'llm/stream'(this: LlmRuntime, options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk>
 ```
 
-Source: [`packages/llm/llm/src/index.ts:64`](../../packages/llm/llm/src/index.ts)
+Source: [`packages/llm/llm/src/index.ts:67`](../../packages/llm/llm/src/index.ts)
 <!-- END GENERATED cordis-surface -->

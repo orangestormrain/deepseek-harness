@@ -10,7 +10,7 @@ import clsx from 'clsx'
 import {
   HoverCard, IconArchiveOutline20, IconBranchOutline16, IconEditOutline16,
   IconEllipsisOutline16, IconFolderClose16, IconFolderOpen16, IconPlusOutline16,
-  IconTrashOutline16, IconTriangleRightFill14, Menu, StateDot,
+  IconRefreshOutline16, IconTrashOutline16, IconTriangleRightFill14, Menu, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WorkspaceBrowserProps } from '../contract/slots.ts'
@@ -468,6 +468,79 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
       content={<SessionHoverContent node={node} now={now} t={t} />}
       disabled={menuOpen || drag?.active === true}
       copyText={row.blank ? undefined : row.title}
+      copyLabel={t('copy')}
+      copiedLabel={t('hover.copied')}
+    />
+  )
+}
+
+/**
+ * One archived-session management row. Clicking restores and opens it; the
+ * row menu restores in place or requests permanent deletion.
+ * @param props.node - archived session row.
+ * @param props.now - epoch ms for relative-time formatting.
+ * @param props.onRestore - restore callback with whether to open afterward.
+ * @param props.onDelete - open the permanent-delete confirmation.
+ * @param props.t - workspace-browser translation seat.
+ * @returns the archived session row.
+ */
+export function ArchivedSessionItem({ node, now, onRestore, onDelete, t }: {
+  node: SessionNode
+  now: number
+  onRestore: (id: SessionNode['id'], openAfter: boolean) => void
+  onDelete: (id: SessionNode['id'], title: string) => void
+  t: RowTranslate
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const statuses = sessionStatuses(node, t)
+  const primaryStatus = statuses[0]
+  const showStatus = primaryStatus.state !== 'done' || node.completed
+  const ownRow = (
+    <div
+      className={clsx(css.sessionRow, !showStatus && css.flatSessionRowWithoutStatus, menuOpen && css.menuOpen)}
+      role="treeitem"
+      onClick={() => { onRestore(node.id, true) }}
+    >
+      {showStatus && (
+        <span className={css.slot}><SessionStatusDots statuses={statuses} /></span>
+      )}
+      <span className={css.title}>{displayTitle(node, t)}</span>
+      <span className={css.time}>{timeLabel(node.updatedAt, now, t)}</span>
+      <span className={css.rowActions}>
+        <Menu
+          open={menuOpen}
+          onClose={() => { setMenuOpen(false) }}
+          items={[
+            { id: 'restore', label: t('menu.restoreSession'), icon: <IconRefreshOutline16 /> },
+            { id: 'delete', label: t('menu.deleteSession'), icon: <IconTrashOutline16 />, danger: true },
+          ]}
+          onSelect={(id) => {
+            setMenuOpen(false)
+            if (id === 'restore') onRestore(node.id, false)
+            if (id === 'delete') onDelete(node.id, displayTitle(node, t))
+          }}
+          portal
+          closeOnPointerLeave
+          anchor={(
+            <button
+              type="button"
+              className={css.iconButton}
+              aria-label={t('actions.session.aria', { name: displayTitle(node, t) })}
+              onClick={(event) => { event.stopPropagation(); setMenuOpen(open => !open) }}
+            >
+              <IconEllipsisOutline16 />
+            </button>
+          )}
+        />
+      </span>
+    </div>
+  )
+  return (
+    <HoverCard
+      anchor={ownRow}
+      content={<SessionHoverContent node={node} now={now} t={t} />}
+      disabled={menuOpen}
+      copyText={node.title}
       copyLabel={t('copy')}
       copiedLabel={t('hover.copied')}
     />

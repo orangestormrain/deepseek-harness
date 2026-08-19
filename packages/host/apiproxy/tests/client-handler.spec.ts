@@ -126,6 +126,11 @@ function scriptedApi(overrides: {
       providers: r => ok(r, { providers: [] }),
       models: r => ok(r, { groups: [], failures: [] }),
       discoverModels: err,
+      login: r => ok(r, {}),
+      loginInput: r => ok(r, {}),
+      cancelLogin: r => ok(r, {}),
+      logout: r => ok(r, {}),
+      oauthStatus: r => ok(r, { providers: [] }),
       ...overrides.llm,
     },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
@@ -753,6 +758,11 @@ describe('config unary surface', () => {
         providers: record('llm.providers', r => ok(r, { providers: [providerRow] })),
         models: record('llm.models', r => ok(r, { groups: [group], failures: [] })),
         discoverModels: record('llm.discoverModels', r => ok(r, { models: [{ id: 'acme-large', contextWindow: 65536 }] })),
+        login: record('llm.login', r => ok(r, {})),
+        loginInput: record('llm.loginInput', r => ok(r, {})),
+        cancelLogin: record('llm.cancelLogin', r => ok(r, {})),
+        logout: record('llm.logout', r => ok(r, {})),
+        oauthStatus: record('llm.oauthStatus', r => ok(r, { providers: [] })),
       },
     })
     const c = client(api)

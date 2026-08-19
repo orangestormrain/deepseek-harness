@@ -594,6 +594,31 @@ describe('fork', () => {
   })
 })
 
+describe('permanent deletion', () => {
+  it('forwards recursive deletion and removes every committed id immediately', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 'root' }, { id: 'child', parentSessionId: sid('root') }])
+    b.api.onSessionDelete = () => Promise.resolve(ok({
+      deletedSessionIds: [sid('child'), sid('root')],
+    }))
+
+    await expect(b.svc.delete(sid('root'), true)).resolves.toEqual(['child', 'root'])
+    expect(b.api.callsOf('session.delete')).toEqual([{ sessionId: 'root', recursive: true }])
+    expect(b.svc.list.getSnapshot().ids).toEqual([])
+  })
+
+  it('retains the local list when deletion is rejected', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 'root' }])
+    b.api.onSessionDelete = () => Promise.resolve(err({
+      code: 'agent-busy', message: 'running', details: { reason: 'SESSION_RUNNING' },
+    }))
+
+    await expect(b.svc.delete(sid('root'), true)).rejects.toThrow('agent-busy: running')
+    expect(b.svc.list.getSnapshot().ids).toEqual(['root'])
+  })
+})
+
 describe('scope lifecycle rides the list mirror (entity parity: no client-side pre-birth)', () => {
   it('a session-added frame births the row (blank) and makes the scope resolvable; removal prunes it', async () => {
     const b = bench()

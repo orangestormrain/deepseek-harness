@@ -16,7 +16,9 @@ vi.mock('node:child_process', () => ({ execFile: execFileMock }))
 
 import { release as osRelease } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
-import { canOpenNativePath, openNativePath, openNativeTextFile, type PathOpenerRunner } from '../src/native-path-opener.ts'
+import {
+  canOpenNativePath, openNativePath, openNativeTextFile, openNativeUrl, type PathOpenerRunner,
+} from '../src/native-path-opener.ts'
 
 const signal = () => new AbortController().signal
 
@@ -118,6 +120,55 @@ describe('native path opener', () => {
 
   it('rejects unsupported platforms', async () => {
     await expect(openNativePath('/x', signal(), { platform: 'freebsd' as NodeJS.Platform }))
+      .rejects.toThrow('unsupported on freebsd')
+  })
+
+  it('opens an https URL with macOS open(1)', async () => {
+    const run = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
+    await openNativeUrl('https://auth.example/authorize?x=1', signal(), { platform: 'darwin', run })
+    expect(run).toHaveBeenCalledWith('open', ['https://auth.example/authorize?x=1'], expect.any(AbortSignal))
+  })
+
+  it('opens an https URL with Windows Start-Process and escapes single quotes', async () => {
+    const run = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
+    await openNativeUrl("https://auth.example/a'b", signal(), { platform: 'win32', run })
+    expect(run).toHaveBeenCalledWith(
+      'powershell.exe',
+      ['-NoProfile', '-Command', "Start-Process 'https://auth.example/a''b'"],
+      expect.any(AbortSignal),
+    )
+  })
+
+  it('opens an https URL with Linux xdg-open, and through Windows on WSL', async () => {
+    const desktop = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
+    await openNativeUrl('https://auth.example/authorize', signal(), {
+      platform: 'linux', osRelease: '6.8.0-generic', env: {}, run: desktop,
+    })
+    expect(desktop).toHaveBeenCalledWith('xdg-open', ['https://auth.example/authorize'], expect.any(AbortSignal))
+
+    const wsl = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
+    await openNativeUrl('https://auth.example/authorize', signal(), {
+      platform: 'linux', osRelease: '5.15.153.1-microsoft-standard-WSL2', env: {}, run: wsl,
+    })
+    expect(wsl).toHaveBeenCalledWith(
+      'powershell.exe',
+      ['-NoProfile', '-Command', "Start-Process 'https://auth.example/authorize'"],
+      expect.any(AbortSignal),
+    )
+  })
+
+  it.each([
+    ['an unparseable value', 'not a url'],
+    ['a non-https scheme', 'http://auth.example/authorize'],
+    ['a file scheme', 'file:///etc/passwd'],
+  ])('refuses %s before any native command runs', async (_label, url) => {
+    const run = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
+    await expect(openNativeUrl(url, signal(), { platform: 'darwin', run })).rejects.toThrow(/refuses/)
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('rejects unsupported platforms for URLs', async () => {
+    await expect(openNativeUrl('https://auth.example', signal(), { platform: 'freebsd' as NodeJS.Platform }))
       .rejects.toThrow('unsupported on freebsd')
   })
 

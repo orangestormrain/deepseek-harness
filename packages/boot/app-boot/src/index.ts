@@ -48,6 +48,12 @@ export {
   type ProfileLayer,
   type ProfileManifest,
 } from './profile.ts'
+export {
+  applySystemProxy,
+  envProxyUrl,
+  windowsSystemProxyUrl,
+  type SystemProxyInternals,
+} from './proxy.ts'
 
 /**
  * Resolve the config to boot. Replay swaps a `cordis.yml` basename for

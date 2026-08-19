@@ -603,6 +603,29 @@ export class SessionManager {
   }
 
   /**
+   * Permanently delete an archived session and optionally its descendants.
+   * @param sessionId - archived root session.
+   * @param recursive - whether descendants are included.
+   * @returns the Host result or a folded transport error.
+   */
+  async delete(
+    sessionId: SessionId,
+    recursive: boolean,
+  ): Promise<RpcResult<{ deletedSessionIds: SessionId[] }>> {
+    try {
+      const { result } = await this.api.sessions.delete({ sessionId, recursive })
+      if (result.ok) {
+        for (const id of result.value.deletedSessionIds) {
+          this.recordMutation({ kind: 'remove', sessionId: id })
+        }
+      }
+      return result
+    } catch (error: unknown) {
+      return transportError(error)
+    }
+  }
+
+  /**
    * Insert-or-enrich a locally synthesized summary: a new id prepends; an
    * existing entry only gains fields it lacks (the session-added frame and the
    * create() echo race — whichever lands second must fill the placeholder's

@@ -33,6 +33,8 @@ export interface RpcErrorDetailsMap {
   'bad-request': { issues: ZodIssue[] }
   'cancelled': {}
   'session-not-found': { sessionId: SessionId }
+  'session-not-archived': { sessionId: SessionId }
+  'session-has-descendants': { sessionId: SessionId; descendantSessionIds: SessionId[] }
   'model-unavailable': { provider: string; model: string }
   'session-conflict': { sessionId: SessionId; requestedCwd: string; existingCwd?: string }
   'invalid-time-zone': { value: string }
@@ -80,6 +82,21 @@ export interface RpcErrorDetailsMap {
    * details name the endpoint asked, never the credential offered.
    */
   'model-discovery-failed': { settingsNs: string; baseURL?: string }
+  /**
+   * The provider route an OAuth operation named is not in the
+   * configurable-provider directory, so nothing can log it in.
+   */
+  'oauth-unknown-provider': { provider: string }
+  /** The settings service is absent, so a login cannot activate its provider route. */
+  'oauth-settings-unavailable': { provider: string }
+  /** The route's profile was written but the route did not register in time. */
+  'oauth-provider-inactive': { provider: string }
+  /** No login flow is running for the route, so there is nothing to answer or cancel. */
+  'oauth-no-active-login': { provider: string }
+  /** The route's live login flow has no prompt waiting for input. */
+  'oauth-no-pending-prompt': { provider: string }
+  /** Removing the route's stored OAuth credential was refused; the message is the seam's own text. */
+  'oauth-logout-rejected': { provider: string }
   'title-invalid': { sessionId: SessionId }
   'fork-unavailable': { sessionId: SessionId }
   'subagent-parent-unavailable': { parentSessionId: SessionId }

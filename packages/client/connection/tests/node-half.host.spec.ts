@@ -173,6 +173,9 @@ describe('connection node half', () => {
       'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
       'credentials.describe', 'credentials.set', 'credentials.unset',
       'llm.discoverModels',
+      // The OAuth plane mutates the stored credential store and drives host
+      // network/browser activity, so it joins the configuration plane.
+      'llm.login', 'llm.loginInput', 'llm.cancelLogin', 'llm.logout', 'llm.oauthStatus',
       // A composition names the plugins a session runs: reading one is
       // reconnaissance, and copy/remove/openDocument manage the roster and
       // drive the host desktop.
@@ -470,6 +473,9 @@ describe('connection node half over a real HTTP server', () => {
         // Carries a draft credential and turns the host into a fetcher for a
         // URL the caller picked: an anonymous LAN caller must not reach it.
         'llm.discoverModels',
+        // The OAuth plane mutates the stored credential store and drives host
+        // network/browser activity, so it joins the configuration plane.
+        'llm.login', 'llm.loginInput', 'llm.cancelLogin', 'llm.logout', 'llm.oauthStatus',
         'agentPreset.read', 'agentPreset.copy', 'agentPreset.openDocument', 'agentPreset.remove',
       ]) {
         expect([method, await call(port, method, 'harness.example')]).toEqual([method, 403])

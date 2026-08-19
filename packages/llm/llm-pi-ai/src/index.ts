@@ -55,16 +55,20 @@
  * @module @deepseek-ai/dsh-llm-pi-ai
  */
 
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { PiAiAdapter } from './adapter.ts'
-import { catalogProviderIds, catalogProviderTakesApiKey } from './catalog.ts'
+import { catalogProviderAuth, catalogProviderIds } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
+import { codexCliCredential, FileOAuthStore, OAUTH_STORE_FILENAME } from './oauth-store.ts'
 
 export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
@@ -122,7 +126,7 @@ function directoryEntries(
 ): LlmConfigurableProvider[] {
   const catalog = new Set(catalogProviderIds())
   const entries = new Map<string, LlmConfigurableProvider>()
-  const declare = (provider: string, displayName: string): void => {
+  const declare = (provider: string, displayName: string, auth?: 'api_key' | 'oauth'): void => {
     entries.set(provider, {
       provider,
       displayName,
@@ -132,17 +136,25 @@ function directoryEntries(
       // narrowing a shipped provider's models stores a profile too, and that
       // route is still one pi-ai knows.
       declared: !catalog.has(provider),
+      ...auth === undefined ? {} : { auth },
     })
   }
-  // A provider whose only native method is OAuth leaves this adapter nothing
-  // to authenticate with, so offering it would put a card on the settings page
-  // whose own posture — no key, credentials discovered by the provider — fails
-  // every request. Catalog *membership* is unaffected, so `declare` above still
-  // answers what pi-ai ships.
+  // The catalog's own auth declaration tells a configuration surface what to
+  // offer: an api-key route gets the key card, an OAuth-only route the login
+  // card. OAuth-only membership used to be withheld because nothing could
+  // authenticate such a route; the adapter's stored-credential seam and login
+  // flow are what made offering it honest.
   for (const provider of catalog) {
-    if (catalogProviderTakesApiKey(provider)) declare(provider, provider)
+    const auth = catalogProviderAuth(provider)
+    if (auth !== undefined) declare(provider, provider, auth)
   }
-  for (const [provider, profile] of profiles) declare(provider, profile.displayName)
+  for (const [provider, profile] of profiles) {
+    // A profile's own credential reference decides the route's method (it can
+    // repoint a catalog route at a key), otherwise the catalog's declaration
+    // answers.
+    const auth = profile.apiKeyEnv !== undefined ? 'api_key' : catalogProviderAuth(provider)
+    declare(provider, profile.displayName, auth)
+  }
   return [...entries.values()]
 }
 
@@ -207,6 +219,16 @@ export function apply(ctx: Context, config: Config): void {
         + ` sending that message as provider-neutral content (${reason})`,
       )
     },
+    // OAuth credentials are structured and owned by this adapter family, so
+    // they live in their own owner-only document under the harness home
+    // rather than in the name→secret credentials seam. A machine that already
+    // signed ChatGPT in through codex-cli adopts that login on first use
+    // instead of demanding a second one.
+    oauthStore: new FileOAuthStore(join(resolveDshHome(), OAUTH_STORE_FILENAME), {
+      sources: {
+        'openai-codex': () => codexCliCredential(config.oauthCodexHome ?? homedir()),
+      },
+    }),
   })
   // The full installed catalog is configurable from the moment the plugin
   // mounts — dormant or not — so configuration surfaces can offer every

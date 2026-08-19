@@ -61,6 +61,16 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     sessionPersistence: SessionPersistence
   }
+
+  interface Events {
+    /**
+     * A stored session log was permanently deleted. The event fires only after
+     * the backend commit and listener failures cannot reject that commit.
+     * @param id - Deleted session identity.
+     * @mode emit
+     */
+    'session-persistence/deleted'(id: SessionId): void
+  }
 }
 
 /**
@@ -141,6 +151,16 @@ export abstract class SessionPersistence extends Service {
    * @param events - the contiguous batch to persist, in seq order.
    */
   abstract append(id: SessionId, events: readonly SessionEvent[]): Promise<void>
+
+  /**
+   * Permanently delete one stored session log. The operation is serialized
+   * with appends for the same id and rejects while a live Session or an
+   * unpublished resume reservation owns the identity. An unmaterialized create
+   * intent is cancelled successfully; an unknown id rejects. After the commit,
+   * every read treats the id as unknown and `session-persistence/deleted` fires.
+   * @param id - Session identity to delete.
+   */
+  abstract delete(id: SessionId): Promise<void>
 
   /**
    * Prepare the exact unpublished Session used by resume. Implementations may

@@ -297,6 +297,28 @@ export function deriveFlat(
   return rows.map(session => sessionNode(session, descendants))
 }
 
+/**
+ * Derive archived-session management rows newest-first. Archived rows remain
+ * in the session list baseline; this projection selects only ids in the
+ * registry-global archive set and excludes session-backed subagents.
+ * @param list - sessions list snapshot.
+ * @param archivedSessionIds - registry-global archive set.
+ * @returns archived rows in recency order.
+ */
+export function deriveArchived(
+  list: SessionListState,
+  archivedSessionIds: readonly SessionId[],
+): SessionNode[] {
+  const archived = new Set(archivedSessionIds)
+  const descendants = indexSubagentDescendants(list.byId)
+  return list.ids
+    .map(id => list.byId[id])
+    .filter((session): session is SessionSummary =>
+      session !== undefined && session.origin !== 'subagent' && archived.has(session.id))
+    .sort(byRecency)
+    .map(session => sessionNode(session, descendants))
+}
+
 /** Relative-time bucket of a session row's trailing label. */
 export type RelativeTimeUnit = 'now' | 'minutes' | 'hours' | 'days' | 'months' | 'years'
 

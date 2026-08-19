@@ -68,6 +68,26 @@ describe('MessageFeedbackService public contract', () => {
     await expect(ctx.messageFeedback.list({ sessionId: fixture.session.id })).rejects.toBe(corruption)
   })
 
+  it('removes feedback sidecars after permanent session deletion', async () => {
+    const { ctx, persistence } = await harness()
+    const fixture = messageFixture('deleted-feedback')
+    persistence.setDurable({ meta: fixture.session.header, events: fixture.session.events })
+    await ctx.messageFeedback.put({
+      sessionId: fixture.session.id,
+      messageId: fixture.assistantMessageIds[0],
+      rating: 'positive',
+      ifVersion: null,
+    })
+
+    await persistence.delete(fixture.session.id)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    persistence.setDurable({ meta: fixture.session.header, events: fixture.session.events })
+    await expect(ctx.messageFeedback.list({ sessionId: fixture.session.id })).resolves.toEqual({
+      ok: true,
+      value: { items: [] },
+    })
+  })
+
   it('rechecks live ownership before returning a cold catalog miss', async () => {
     const { ctx, persistence } = await harness()
     const sessionId = SessionId('catalog-live-race')

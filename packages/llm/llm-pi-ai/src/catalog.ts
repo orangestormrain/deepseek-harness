@@ -143,22 +143,33 @@ export function catalogProviderIds(): readonly string[] {
 
 /**
  * Whether the installed catalog provider for one route declares an api-key
- * method — the only authentication this adapter obtains on its own.
- *
- * A key is what the harness resolves through its own credential seam and hands
- * pi-ai per request. pi-ai's other method, OAuth, resolves from a *stored*
- * OAuth credential alone: `resolveProviderAuth` has no ambient path for it,
- * this adapter builds its `Models` collection with no credential store, and
- * nothing here runs a login flow. So a provider offering OAuth by itself
- * leaves nothing for this adapter to authenticate with, and the posture such a
- * provider invites — no key configured, credentials discovered by the provider
- * — fails every request with `Provider is not configured`.
+ * method — the authentication the harness resolves through its own credential
+ * seam and hands pi-ai per request. OAuth is the other method: pi-ai resolves
+ * it from the stored credential the adapter's login flow persists, so a
+ * provider offering OAuth alone needs no key and answers `false` here.
  * @param provider - provider route key.
  * @returns whether the catalog provider takes an api key; false for a route
  *   pi-ai does not ship, which the caller answers for separately.
  */
 export function catalogProviderTakesApiKey(provider: string): boolean {
   return catalogProvider(provider)?.auth.apiKey !== undefined
+}
+
+/**
+ * The authentication method the installed catalog provider for one route
+ * declares, when it declares one. A provider offering both resolves as
+ * `api_key` — a key always authenticates, so configuration surfaces keep
+ * their key posture for it.
+ * @param provider - provider route key.
+ * @returns `api_key` or `oauth`, or `undefined` for a route pi-ai does not
+ *   ship or that declares neither method.
+ */
+export function catalogProviderAuth(provider: string): 'api_key' | 'oauth' | undefined {
+  const entry = catalogProvider(provider)
+  if (entry === undefined) return undefined
+  if (entry.auth.apiKey !== undefined) return 'api_key'
+  if (entry.auth.oauth !== undefined) return 'oauth'
+  return undefined
 }
 
 /**

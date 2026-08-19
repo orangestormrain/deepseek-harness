@@ -8,7 +8,7 @@ import { mkdir, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -107,7 +107,29 @@ import {
   hasApiRemoteSubagentOwner,
   inspectApiRemoteSession,
 } from '@deepseek-ai/dsh-api-remotes'
-import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
+import { canOpenNativePath, openNativePath, openNativeTextFile, openNativeUrl } from './native-path-opener.ts'
+import { abortOauthFlow, oauthFlow, startOauthLogin } from './oauth-login.ts'
+
+/** How long a login waits for its freshly written profile to register the route. */
+const OAUTH_ROUTE_REGISTRATION_TIMEOUT_MS = 5_000
+
+/**
+ * Wait for one provider route to appear in the adapter registry after its
+ * profile was written. The settings write is durable before `mutate` resolves,
+ * but the file watcher that re-registers routes runs on its own schedule, so
+ * the login gives it a bounded window before reporting the route inactive.
+ * @param ctx - host context carrying the llm registry.
+ * @param provider - provider route to wait for.
+ * @returns whether the route registered within the window.
+ */
+async function waitForRouteRegistration(ctx: Context, provider: string): Promise<boolean> {
+  const deadline = Date.now() + OAUTH_ROUTE_REGISTRATION_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (ctx.llm.listProviders().some(entry => entry.id === provider)) return true
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  return ctx.llm.listProviders().some(entry => entry.id === provider)
+}
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
@@ -1094,6 +1116,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const presetSwitches = new Map<SessionId, Promise<unknown>>()
   /** Client-chosen identity creation/resume, deduplicated across concurrent retries. */
   const sessionCreations = new Map<SessionId, Promise<Agent>>()
+  /**
+   * Teardown capabilities for Agents this gateway created or resumed. A bare
+   * registry entry remains observation-only; session deletion may dispose only
+   * an exact handle retained here.
+   */
+  const ownedSessionHandles = new Map<SessionId, AgentHandle>()
+  /** Session identities whose permanent deletion blocks new resume/create work. */
+  const deletingSessions = new Set<SessionId>()
+  /** Serializes permanent deletion requests across overlapping lineage trees. */
+  let sessionDeletionChain = Promise.resolve()
   /** Serializes path ownership and explicit title checks with Workspace mutations. */
   let workspaceCreationChain = Promise.resolve()
   const pendingQuestions = new Map<RpcId, PendingQuestion>()
@@ -1583,6 +1615,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     }
   }
 
+  /** Retain the exact teardown capability returned by this gateway's Agent creation. */
+  function retainSessionHandle(handle: AgentHandle): Agent {
+    ownedSessionHandles.set(handle.agent.session.id, handle)
+    return handle.agent
+  }
+
   /** Resolve one requested identity to a live agent, creating or resuming it once. */
   async function ensureSession(
     sessionId: SessionId,
@@ -1590,6 +1628,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     checkPersistedIdentity: boolean,
     presetId?: string,
   ): Promise<Agent> {
+    if (deletingSessions.has(sessionId)) {
+      throw new Error(`session "${sessionId}" is being permanently deleted`)
+    }
     let creation = sessionCreations.get(sessionId)
     if (creation === undefined) {
       creation = (async () => {
@@ -1623,11 +1664,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // session's history was produced under that composition, and
           // rebuilding it differently would replay tool calls the model can no
           // longer make.
-          return (await ctx.agents.resume({
+          if (deletingSessions.has(sessionId)) {
+            throw new Error(`session "${sessionId}" is being permanently deleted`)
+          }
+          return retainSessionHandle(await ctx.agents.resume({
             resumeSessionId: sessionId,
             agentOptions: agentOptions(),
             setup: (await composeAgent(storedPreset)).setup,
-          })).agent
+          }))
         }
 
         try {
@@ -1636,7 +1680,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
         }
         const composition = await composeAgent(presetId)
-        return (await ctx.agents.create({
+        if (deletingSessions.has(sessionId)) {
+          throw new Error(`session "${sessionId}" is being permanently deleted`)
+        }
+        return retainSessionHandle(await ctx.agents.create({
           sessionId,
           agentOptions: agentOptions(),
           meta: {
@@ -1644,7 +1691,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
           },
           setup: composition.setup,
-        })).agent
+        }))
       })().catch((error: unknown) => {
         // Another Host entry path may have published the same identity while
         // this operation crossed an asynchronous persistence/filesystem step.
@@ -2571,6 +2618,121 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         agent.cancel({ kind: 'user' }, { keepInbox: true })
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
+
+      delete(request) {
+        const operation: Promise<RpcResponse<{ deletedSessionIds: SessionId[] }>> = sessionDeletionChain.then(async () => {
+          const { sessionId, recursive = false } = request.payload
+          const persistence = ctx.get('sessionPersistence')
+          if (persistence === undefined) {
+            return err(request, {
+              code: 'internal',
+              message: 'session persistence is unavailable',
+              details: {},
+            })
+          }
+          const headers = await persistence.list()
+          if (!headers.some(header => header.id === sessionId)) {
+            return err(request, {
+              code: 'session-not-found',
+              message: `session "${sessionId}" not found`,
+              details: { sessionId },
+            })
+          }
+          if (!ctx.workspaceRegistry.archivedSessionIds.includes(sessionId)) {
+            return err(request, {
+              code: 'session-not-archived',
+              message: `session "${sessionId}" must be archived before permanent deletion`,
+              details: { sessionId },
+            })
+          }
+
+          const children = new Map<SessionId, SessionId[]>()
+          for (const header of headers) {
+            if (header.parentSession === undefined) continue
+            const siblings = children.get(header.parentSession) ?? []
+            siblings.push(header.id)
+            children.set(header.parentSession, siblings)
+          }
+          const descendants: SessionId[] = []
+          const visiting = new Set<SessionId>()
+          const visited = new Set<SessionId>([sessionId])
+          const collectBottomUp = (id: SessionId): void => {
+            visiting.add(id)
+            for (const child of children.get(id) ?? []) {
+              if (visiting.has(child)) throw new Error(`session lineage cycle reaches "${child}"`)
+              if (visited.has(child)) continue
+              visited.add(child)
+              collectBottomUp(child)
+              descendants.push(child)
+            }
+            visiting.delete(id)
+          }
+          collectBottomUp(sessionId)
+          if (!recursive && descendants.length > 0) {
+            return err(request, {
+              code: 'session-has-descendants',
+              message: `session "${sessionId}" has descendant sessions`,
+              details: { sessionId, descendantSessionIds: descendants },
+            })
+          }
+          const targets = recursive ? [...descendants, sessionId] : [sessionId]
+          for (const id of targets) deletingSessions.add(id)
+          try {
+            await Promise.all(targets.map(async (id) => {
+              try {
+                await sessionCreations.get(id)
+              } catch {
+                // A failed creation published no lifecycle; the live checks below are authoritative.
+              }
+            }))
+            for (const id of targets) {
+              const agent = ctx.agents.get(id)
+              const session = ctx.sessions.get(id)
+              if (agent?.status === 'running') {
+                return err(request, {
+                  code: 'agent-busy',
+                  message: `session "${id}" is running; cancel it before deletion`,
+                  details: { reason: 'SESSION_RUNNING' },
+                })
+              }
+              const handle = ownedSessionHandles.get(id)
+              if (session !== undefined && (handle === undefined || handle.agent !== agent)) {
+                return err(request, {
+                  code: 'agent-busy',
+                  message: `session "${id}" is attached outside this gateway and cannot be deleted`,
+                  details: { reason: 'SESSION_NOT_OWNED' },
+                })
+              }
+            }
+
+            for (const id of targets) {
+              const handle = ownedSessionHandles.get(id)
+              if (handle !== undefined && ctx.agents.get(id) === handle.agent) {
+                await handle.dispose()
+              }
+              ownedSessionHandles.delete(id)
+              await persistence.delete(id)
+            }
+            try {
+              await ctx.workspaceRegistry.forgetSessions(targets)
+            } catch (error: unknown) {
+              // Persistence commits are irreversible. Workspace grouping
+              // already filters missing session ids, so an account cleanup
+              // failure must not turn committed deletion into a retry error.
+              ctx.logger.warn(`session deletion workspace cleanup failed: ${String(error)}`)
+            }
+            return ok(request, { deletedSessionIds: targets })
+          } finally {
+            for (const id of targets) deletingSessions.delete(id)
+          }
+        })
+        sessionDeletionChain = operation.then(() => undefined, () => undefined)
+        return operation.catch((error: unknown) => err(request, {
+          code: 'internal',
+          message: error instanceof Error ? error.message : String(error),
+          details: {},
+        }))
+      },
     },
 
     subagents: {
@@ -2856,6 +3018,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { sessionId },
           })
         }
+        return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+      },
+
+      async unarchiveSession(request) {
+        await ctx.workspaceRegistry.unarchiveSession(request.payload.sessionId)
         return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
       },
     },
@@ -3317,6 +3484,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           settingsPath: [...entry.settingsPath],
           active: active.has(entry.provider),
           ...entry.declared === undefined ? {} : { declared: entry.declared },
+          ...entry.auth === undefined ? {} : { auth: entry.auth },
         }))
         // Routes registered without a directory declaration still appear —
         // they exist and serve models — just with no settings address. No
@@ -3360,6 +3528,142 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { settingsNs, ...baseURL === undefined ? {} : { baseURL } },
           })
         }
+      },
+
+      async login(request) {
+        const { provider } = request.payload
+        const directory = ctx.llm.listConfigurableProviders().find(entry => entry.provider === provider)
+        if (directory === undefined) {
+          return err(request, {
+            code: 'oauth-unknown-provider',
+            message: `no configurable provider "${provider}" is declared`,
+            details: { provider },
+          })
+        }
+        const settings = ctx.get('settings')
+        if (settings === undefined) {
+          return err(request, {
+            code: 'oauth-settings-unavailable',
+            message: 'the settings service is unavailable, so the login cannot activate its provider route',
+            details: { provider },
+          })
+        }
+        // An OAuth route authenticates from the adapter's own credential
+        // store, so its profile is the minimal `{}`; writing it is what
+        // registers the route the login flow logs into.
+        if (!ctx.llm.listProviders().some(entry => entry.id === provider)) {
+          try {
+            await settings.mutate(settingsNamespace(directory.settingsNs), [{
+              op: 'set',
+              path: [...directory.settingsPath],
+              value: {},
+            }])
+          } catch (error: unknown) {
+            return err(request, {
+              code: 'settings-rejected',
+              message: error instanceof Error ? error.message : String(error),
+              details: { ns: directory.settingsNs },
+            })
+          }
+          if (!await waitForRouteRegistration(ctx, provider)) {
+            return err(request, {
+              code: 'oauth-provider-inactive',
+              message: `provider "${provider}" did not register after its profile was written;`
+                + ' check the settings document for a refused update',
+              details: { provider },
+            })
+          }
+        }
+        // A route that already holds a credential (an adopted codex-cli login,
+        // or a previous sign-in) needs no flow: `llm.login` is then just the
+        // "enable this route" action, and starting one would open an
+        // authorization page for an account that is already bound.
+        const status = await ctx.llm.oauthStatus(provider)
+        if (status.connected) return ok(request, {})
+        abortOauthFlow(provider)
+        startOauthLogin(ctx, provider, {
+          // The host opens the authorization page the moment the flow asks
+          // for it, like a CLI login would; the page keeps its link as the
+          // fallback when no desktop is reachable.
+          openBrowser: (url) => {
+            void openNativeUrl(url, new AbortController().signal).catch((error: unknown) => {
+              ctx.logger.warn(`llm login: could not open the authorization page for "${provider}"; use the Models page link instead`)
+              ctx.logger.warn(error)
+            })
+          },
+        })
+        return ok(request, {})
+      },
+
+      async loginInput(request) {
+        const { provider, value } = request.payload
+        const flow = oauthFlow(provider)
+        if (flow === undefined) {
+          return err(request, {
+            code: 'oauth-no-active-login',
+            message: `no login flow is running for provider "${provider}"`,
+            details: { provider },
+          })
+        }
+        if (!flow.answer(value)) {
+          return err(request, {
+            code: 'oauth-no-pending-prompt',
+            message: `the login flow for provider "${provider}" has no prompt waiting for input`,
+            details: { provider },
+          })
+        }
+        return ok(request, {})
+      },
+
+      async cancelLogin(request) {
+        const { provider } = request.payload
+        // Cancelling must not touch a stored credential: a re-login the user
+        // abandons leaves the previous session signed in.
+        if (oauthFlow(provider) === undefined) {
+          return err(request, {
+            code: 'oauth-no-active-login',
+            message: `no login flow is running for provider "${provider}"`,
+            details: { provider },
+          })
+        }
+        abortOauthFlow(provider)
+        return ok(request, {})
+      },
+
+      async logout(request) {
+        const { provider } = request.payload
+        // A running flow would fight the credential removal (and could
+        // re-store it on completion), so the flow goes first.
+        abortOauthFlow(provider)
+        try {
+          await ctx.llm.logout(provider)
+        } catch (error: unknown) {
+          return err(request, {
+            code: 'oauth-logout-rejected',
+            message: error instanceof Error ? error.message : String(error),
+            details: { provider },
+          })
+        }
+        return ok(request, {})
+      },
+
+      async oauthStatus(request) {
+        const { provider } = request.payload
+        const candidates = provider !== undefined
+          ? [{ provider }]
+          : ctx.llm.listConfigurableProviders()
+            .filter(entry => entry.auth === 'oauth')
+            .map(entry => ({ provider: entry.provider }))
+        const providers = await Promise.all(candidates.map(async ({ provider: route }) => {
+          try {
+            return await ctx.llm.oauthStatus(route)
+          } catch {
+            // Status is a question with a negative answer: an adapter that
+            // cannot answer holds no credential for the route.
+            return { provider: route, connected: false }
+          }
+        }))
+        return ok(request, { providers })
       },
     },
 
@@ -3493,6 +3797,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }),
           ctx.on('session/disposed', (session: Session) => {
             queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
+          }),
+          ctx.on('session-persistence/deleted', (sessionId: SessionId) => {
+            // Cold sessions have no session/disposed edge. Attached deletions
+            // may duplicate the id; client removal is idempotent.
+            queue.push(frame({ type: 'host/session-removed', sessionId }))
           }),
           ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
             queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))

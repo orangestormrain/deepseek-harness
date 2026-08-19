@@ -908,6 +908,12 @@ export interface Config {
    * and registers them the moment a settings section supplies profiles.
    */
   providers?: Record<string, PiAiProviderProfile>
+  /**
+   * OS home whose `~/.codex/auth.json` is the external credential source for
+   * the `openai-codex` route (codex-cli's ChatGPT login). Defaults to the
+   * process home; a deployment that keeps codex state elsewhere names it.
+   */
+  oauthCodexHome?: string
 }
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */

@@ -159,6 +159,13 @@ function scriptedFace(overrides: {
         ],
       }))),
       models: vi.fn(() => Promise.resolve(ok({ groups: [], failures: [] }))),
+      oauthStatus: vi.fn<() => Promise<RpcResponse<{ providers: Array<{ provider: string; connected: boolean; accountId?: string }> }>>>(
+        () => Promise.resolve(ok({ providers: [] })),
+      ),
+      login: vi.fn(() => Promise.resolve(ok({}))),
+      loginInput: vi.fn(() => Promise.resolve(ok({}))),
+      cancelLogin: vi.fn(() => Promise.resolve(ok({}))),
+      logout: vi.fn(() => Promise.resolve(ok({}))),
     },
     settings: {
       describe: vi.fn(() => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: wireNamespaces() }))),
@@ -1381,5 +1388,178 @@ describe('apiKeyFailure', () => {
     // heuristic leaves them alone rather than guessing at a paste error.
     expect(apiKeyFailure('"')).toBeUndefined()
     expect(apiKeyFailure('"a')).toBeUndefined()
+  })
+})
+
+describe('OAuth cards', () => {
+  const OAUTH_ROW = {
+    provider: 'openai-codex',
+    displayName: 'OpenAI Codex',
+    settingsNs: 'llm-pi-ai',
+    settingsPath: ['providers', 'openai-codex'],
+    active: true,
+    auth: 'oauth' as const,
+  }
+
+  /** The scripted face plus an oauth provider row that is configured and live. */
+  async function mountOAuth(overrides: Parameters<typeof scriptedFace>[0] = {}) {
+    const scripted = scriptedFace(overrides)
+    scripted.face.llm.providers.mockImplementation(() => Promise.resolve(ok({
+      providers: [OAUTH_ROW],
+    })))
+    scripted.face.settings.describe.mockImplementation(() => Promise.resolve(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: [{
+        ns: 'llm-pi-ai',
+        schema: {},
+        value: { providers: { 'openai-codex': {} } },
+        user: { providers: { 'openai-codex': {} } },
+        applies: 'live' as const,
+        secrets: [],
+        revision: 0,
+      }] as never,
+    })))
+    return mountFace(scripted)
+  }
+
+  it('renders the sign-in card for an oauth route with no stored credential', async () => {
+    const { face } = await mountOAuth()
+    expect(screen.getByText('OpenAI Codex')).toBeTruthy()
+    expect(screen.getByText(en.oauthSignIn)).toBeTruthy()
+    fireEvent.click(screen.getByText(en.oauthSignIn))
+    expect(face.llm.login).toHaveBeenCalledWith({ provider: 'openai-codex' })
+  })
+
+  it('walks the card through a browser-login flow and its manual-code fallback', async () => {
+    const { controller, face } = await mountOAuth()
+    act(() => {
+      controller.handleOAuthEvent('openai-codex', { type: 'auth_url', url: 'https://auth.openai.com/oauth/authorize', instructions: 'finish it' })
+    })
+    const link = screen.getByText(en.oauthOpenBrowser) as HTMLAnchorElement
+    expect(link.href).toBe('https://auth.openai.com/oauth/authorize')
+    expect(screen.getByText('finish it')).toBeTruthy()
+    expect(screen.getByText(en.oauthCancel)).toBeTruthy()
+
+    // Without instructions the card falls back to the generic browser hint.
+    act(() => {
+      controller.handleOAuthEvent('openai-codex', { type: 'auth_url', url: 'https://auth.openai.com/oauth/authorize' })
+    })
+    expect(screen.getByText(en.oauthBrowserHint)).toBeTruthy()
+
+    act(() => {
+      controller.handleOAuthEvent('openai-codex', { type: 'device_code', userCode: 'ABC-123', verificationUri: 'https://auth.openai.com/codex/device' })
+    })
+    expect(screen.getByText('ABC-123')).toBeTruthy()
+
+    act(() => {
+      controller.handleOAuthEvent('openai-codex', { type: 'manual_code', message: 'paste the code', placeholder: 'http://localhost:1455/auth/callback' })
+    })
+    const input = screen.getByLabelText('paste the code') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'http://localhost:1455/auth/callback?code=x' } })
+    fireEvent.click(screen.getByText(en.oauthSubmit))
+    expect(face.llm.loginInput).toHaveBeenCalledWith({
+      provider: 'openai-codex',
+      value: 'http://localhost:1455/auth/callback?code=x',
+    })
+  })
+
+  it('renders the connected state and signs out through the wire', async () => {
+    const scripted = scriptedFace()
+    scripted.face.llm.providers.mockImplementation(() => Promise.resolve(ok({ providers: [OAUTH_ROW] })))
+    scripted.face.llm.oauthStatus.mockImplementation(() => Promise.resolve(ok({
+      providers: [{ provider: 'openai-codex', connected: true, accountId: 'acct-1' }],
+    })))
+    scripted.face.settings.describe.mockImplementation(() => Promise.resolve(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: [{
+        ns: 'llm-pi-ai',
+        schema: {},
+        value: { providers: { 'openai-codex': {} } },
+        applies: 'live' as const,
+        secrets: [],
+        revision: 0,
+      }] as never,
+    })))
+    const { face } = await mountFace(scripted)
+    await waitFor(() => expect(screen.getByText(en.oauthSignedInAs.replace('{account}', 'acct-1'))).toBeTruthy())
+    fireEvent.click(screen.getByText(en.oauthSignOut))
+    expect(face.llm.logout).toHaveBeenCalledWith({ provider: 'openai-codex' })
+  })
+
+  it('shows an enable action for a signed-in route that is not registered yet', async () => {
+    const scripted = scriptedFace()
+    scripted.face.llm.providers.mockImplementation(() => Promise.resolve(ok({
+      providers: [{ ...OAUTH_ROW, active: false }],
+    })))
+    scripted.face.llm.oauthStatus.mockImplementation(() => Promise.resolve(ok({
+      providers: [{ provider: 'openai-codex', connected: true, accountId: 'acct-1' }],
+    })))
+    scripted.face.settings.describe.mockImplementation(() => Promise.resolve(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: [{
+        ns: 'llm-pi-ai',
+        schema: {},
+        // The profile exists (someone enabled the route before), but the
+        // adapter registry does not serve it in this boot.
+        value: { providers: { 'openai-codex': {} } },
+        user: { providers: { 'openai-codex': {} } },
+        applies: 'live' as const,
+        secrets: [],
+        revision: 0,
+      }] as never,
+    })))
+    const { face } = await mountFace(scripted)
+    await waitFor(() => expect(screen.getByText(en.oauthSignedInAs.replace('{account}', 'acct-1'))).toBeTruthy())
+    // No sign-out: the account is bound but the route is dormant, so the
+    // action enables it (the host skips the flow for a connected route).
+    expect(screen.queryByText(en.oauthSignOut)).toBeNull()
+    fireEvent.click(screen.getByText(en.oauthEnable))
+    expect(face.llm.login).toHaveBeenCalledWith({ provider: 'openai-codex' })
+  })
+
+  it('cancels a live flow from the card', async () => {
+    const { controller, face } = await mountOAuth()
+    act(() => {
+      controller.handleOAuthEvent('openai-codex', { type: 'auth_url', url: 'https://auth.openai.com/oauth/authorize' })
+    })
+    fireEvent.click(screen.getByText(en.oauthCancel))
+    expect(face.llm.cancelLogin).toHaveBeenCalledWith({ provider: 'openai-codex' })
+  })
+
+  it('renders the sign-in card in the add flow for a not-yet-configured oauth route', async () => {
+    const scripted = scriptedFace()
+    // The oauth route exists in the directory but no layer configures it, so
+    // it enters through the add flow rather than as a configured row.
+    scripted.face.llm.providers.mockImplementation(() => Promise.resolve(ok({ providers: [OAUTH_ROW] })))
+    scripted.face.settings.describe.mockImplementation(() => Promise.resolve(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: [{
+        ns: 'llm-pi-ai',
+        schema: {},
+        value: { providers: {} },
+        applies: 'live' as const,
+        secrets: [],
+        revision: 0,
+      }] as never,
+    })))
+    const { face } = await mountFace(scripted)
+    fireEvent.click(screen.getByText(en.add))
+    // The add card renders the login card, not the key editor.
+    expect(screen.getByText(en.oauthSignIn)).toBeTruthy()
+    fireEvent.click(screen.getByText(en.oauthSignIn))
+    expect(face.llm.login).toHaveBeenCalledWith({ provider: 'openai-codex' })
+  })
+
+  it('shows a failed flow as an error the user can retry', async () => {
+    const { controller } = await mountOAuth()
+    act(() => {
+      controller.handleOAuthEvent('openai-codex', { type: 'error', message: 'the provider refused' })
+    })
+    expect(screen.getByText('the provider refused')).toBeTruthy()
+    expect(screen.getByText(en.oauthSignIn)).toBeTruthy()
   })
 })

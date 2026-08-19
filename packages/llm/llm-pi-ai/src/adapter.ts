@@ -13,17 +13,21 @@
  * way down: switching models mid-reply takes effect on the next step, never
  * inside the one in flight.
  *
- * Credentials stay outside that collection. The harness resolves a route's key
+ * API keys stay outside that collection: the harness resolves a route's key
  * through its own seam and passes it as the request's `apiKey` option, which
- * pi-ai treats as the highest-priority auth override — so `Models` never holds
- * a credential store and the harness keeps its fail-loud reference semantics.
+ * pi-ai treats as the highest-priority auth override. OAuth credentials are
+ * the opposite — pi-ai resolves them only from a *stored* credential, so the
+ * collection is built over the durable store the plugin injects, and login
+ * flows persist into it.
  *
  * @module dsh-llm-pi-ai/adapter
  */
 
-import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
+import { createModels, getSupportedThinkingLevels, InMemoryCredentialStore } from '@earendil-works/pi-ai'
 import type {
   Api,
+  Credential,
+  CredentialStore,
   Model,
   Models,
   ModelThinkingLevel,
@@ -40,7 +44,10 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
+  LlmLoginInteraction,
+  LlmLoginResult,
   LlmModelInfo,
+  LlmOAuthStatus,
   LlmProviderInfo,
   LlmResolvedModelInfo,
   ReasoningEffortId as ReasoningEffortIdType,
@@ -74,6 +81,13 @@ export interface PiAiAdapterOptions {
    * `MISSING_CREDENTIAL` rather than falling back.
    */
   resolveApiKey: (provider: string, profile: ResolvedPiAiProviderProfile) => Promise<string | undefined>
+  /**
+   * Durable store pi-ai resolves OAuth credentials from and login flows
+   * persist into. Absent (tests, or an assembly without OAuth support) falls
+   * back to an in-memory store that satisfies the same contract for the
+   * process lifetime.
+   */
+  oauthStore?: CredentialStore
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
   /**
@@ -190,9 +204,12 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
  */
 export class PiAiAdapter extends LlmAdapter {
   private snapshot: PiAiSnapshot | undefined
+  /** The credential store every snapshot's `Models` collection resolves through. */
+  private readonly oauthStore: CredentialStore
 
   constructor(private readonly config: PiAiAdapterOptions) {
     super()
+    this.oauthStore = config.oauthStore ?? new InMemoryCredentialStore()
   }
 
   /**
@@ -204,7 +221,7 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels()
+    const models: MutableModels = createModels({ credentials: this.oauthStore })
     for (const profile of profiles.values()) models.setProvider(profile.piProvider)
     this.snapshot = { profiles, models }
     return this.snapshot
@@ -276,6 +293,53 @@ export class PiAiAdapter extends LlmAdapter {
         ...reasoningInfo(resolvedModel, defaultLevel),
       }
     })
+  }
+
+  /** The provider-side account identifier a stored credential discloses, if any. */
+  private accountIdOf(credential: Credential): string | undefined {
+    if (credential.type !== 'oauth') return undefined
+    const accountId = credential.accountId
+    return typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined
+  }
+
+  override async login(
+    provider: string,
+    interaction: LlmLoginInteraction,
+  ): Promise<LlmLoginResult> {
+    // The interaction DSH defines is structurally the interaction pi-ai's
+    // OAuth flows drive (same prompt and event vocabulary), so it is handed
+    // through without translation; only the route's adapter can answer, which
+    // is why the route must already be registered.
+    const snapshot = this.current()
+    this.profileOf(snapshot, provider)
+    const credential = await snapshot.models.login(provider, 'oauth', interaction)
+    const accountId = this.accountIdOf(credential)
+    return accountId === undefined ? {} : { accountId }
+  }
+
+  override async logout(provider: string): Promise<void> {
+    const snapshot = this.current()
+    this.profileOf(snapshot, provider)
+    await snapshot.models.logout(provider)
+  }
+
+  override async oauthStatus(provider: string): Promise<LlmOAuthStatus> {
+    const snapshot = this.current()
+    this.profileOf(snapshot, provider)
+    const credential = await this.oauthStore.read(provider)
+    if (credential === undefined || credential.type !== 'oauth') {
+      return { provider, connected: false }
+    }
+    const accountId = this.accountIdOf(credential)
+    return {
+      provider,
+      connected: true,
+      ...accountId === undefined ? {} : { accountId },
+      // An adopted credential whose expiry is unknown (codex-cli records
+      // none) carries `expires: 0`; status then reports connection without
+      // pretending to know an expiry, and the first request refreshes.
+      ...credential.expires > 0 ? { expiresAt: credential.expires } : {},
+    }
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

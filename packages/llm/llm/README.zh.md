@@ -13,7 +13,10 @@
 - `ctx.llm.registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle` 为给定提供方路由注册一个适配器实例。注册要么全部成功，要么全部不生效，并且会随调用 fiber 一起 dispose（资源释放）。返回的句柄还提供 `replace(providers)`：候选路由集合会在注册状态发生任何变化前完成整体验证，因此与另一适配器发生冲突时，当前路由仍保持注册并继续提供服务。替换会在一次同步操作中完成，不会出现可观察的空档。`replace([])` 合法，表示保留注册但不持有任何路由；初始注册则不得为空。
 - `ctx.llm.listProviders(): LlmProviderInfo[]` 按注册顺序描述已注册提供方路由。
 - `ctx.llm.registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle` 声明适配器插件可通过配置激活的提供方路由——无论已注册还是休眠——每个条目指明其所属 settings namespace，以及 profile 在该分节内的路径。要么全部成功，要么全部不生效（`INVALID_DIRECTORY`/`DUPLICATE_DIRECTORY`），并随调用 fiber dispose。该句柄还带 `replace(entries)`：候选集合会先被整体校验，因此其中若有条目已被另一个注册声明，当前集合原封不动；此处允许传空数组。声明集合随配置变化的插件必须使用 `replace`，而不是先 dispose 再重新注册——后者会在新集合被拒时让目录整个落空。
-- `ctx.llm.listConfigurableProviders(): LlmConfigurableProvider[]` 按声明顺序列出可配置提供方目录；配置界面将其与 `listProviders()` 合并，为每个条目标注存活或休眠。条目可携带 `declared`，表示拥有该路由的适配器是否只因配置点名才知道它。只有适配器能回答这一点：该字段缺失时，只表示该适配器不区分这两种来源，不能据此判断路由是否随产品交付。
+- `ctx.llm.listConfigurableProviders(): LlmConfigurableProvider[]` 按声明顺序列出可配置提供方目录；配置界面将其与 `listProviders()` 合并，为每个条目标注存活或休眠。条目可携带 `declared`，表示拥有该路由的适配器是否只因配置点名才知道它；也可携带 `auth`，表示适配器解析的认证方式（`'api_key'` 或 `'oauth'`），让界面在路由由账号而非密钥配置时渲染登录卡片。只有适配器能回答这两点：字段缺失时，只表示该适配器不区分这两种来源，不能据此判断路由是否随产品交付。
+- `ctx.llm.login(provider: string, interaction: LlmLoginInteraction): Promise<LlmLoginResult>` 为一条已注册路由运行所属适配器的 OAuth 登录流程，并持久化其凭据。流程驱动调用方提供的交互对象（宿主负责转发其 prompt 与事件）；路由必须已注册，适配器才有提供方可以登录。未知路由以 `NO_ADAPTER` 失败；没有登录流程的适配器以 `OAUTH_UNSUPPORTED` 失败。
+- `ctx.llm.logout(provider: string): Promise<void>` 移除一条已注册路由存储的 OAuth 凭据（失败码与 `login` 相同：`NO_ADAPTER`/`OAUTH_UNSUPPORTED`）。
+- `ctx.llm.oauthStatus(provider: string): Promise<LlmOAuthStatus>` 报告该路由的适配器是否存有 OAuth 凭据及其可披露内容。无适配器拥有或适配器不持 OAuth 存储的路由回答 `connected: false` 而非失败——问题只是「有没有已存凭据」，没有属主本身就是否定答案。
 - `ctx.llm.registerModelDiscovery(settingsNs: string, discover): () => void` 为本插件拥有的 settings namespace 提供查询提供方端点的能力。每个 namespace 只能有一个（`INVALID_DISCOVERY`/`DUPLICATE_DISCOVERY`），并随调用 fiber dispose。
 - `ctx.llm.listModelDiscoveryNamespaces(): string[]` 列出可以询问端点的 namespace，让界面只在可用之处提供该动作。
 - `ctx.llm.discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<LlmDiscoveredModel[]>` 询问某个端点它公布了哪些模型。
@@ -41,6 +44,7 @@
 | 事件 | 模式 | 用途 |
 |---|---|---|
 | `llm/stream` | waterfall | 拦截／包装每次流式模型调用，用于缓存、日志或路由 |
+| `llm/oauth-event` | emit | 把登录流程的某一步（`provider`、`event`）从正在运行的登录转发给所有观察它的界面；`manual_code` 步骤由转发属主经 `loginInput` 应答 |
 
 ### 扩展点
 
@@ -69,7 +73,7 @@
 
 ### 类
 
-- `LlmAdapter`：提供方适配器的抽象基类。唯一必需方法是 `stream()`。
+- `LlmAdapter`：提供方适配器的抽象基类。唯一必需方法是 `stream()`。其路由以 OAuth 认证的适配器还会额外覆盖可选的 `login()`（针对宿主提供的交互对象运行提供方流程并持久化返回的凭据）、`logout()` 与 `oauthStatus()`；不覆盖时，运行时以 `OAUTH_UNSUPPORTED` 拒绝登录／登出，并把状态回答为未连接。
 - `BlockAssembler`：将原始分片逐步组装为完整内容块，并能据此创建带标识且冻结的 assistant 消息。agent loop 向它提供原始分片（同时记录以供回放），并读取已组装块以构建历史。
 - `HarnessError`：harness 错误分类体系的基类，包含稳定 `code` 字符串（与面向人的 `message` 不同）以及 `cause` 链。它位于所有其他包都从中导入的叶子包中，因此可以共享单一基类，无需新的依赖边。各包的错误（`LlmError`、`ToolArgsError`、`InvariantError` 等）都继承自它。`isHarnessError(value)` 在进程边界处收窄类型。
 - `LlmError`：继承自 `HarnessError`；其稳定 `code` 字符串（`NO_ADAPTER`、`DUPLICATE_ADAPTER` 与 `AUTH`／`RATE_LIMIT` 等适配器 code）与冻结可序列化 `failure.code` 匹配。Payload 还可以保留已验证状态、`Retry-After` 和品牌化提供方请求 id 事实；策略位于错误之外。

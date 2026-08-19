@@ -281,6 +281,21 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async discoverModels(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { models: [] } } }
       },
+      async login(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: {} } }
+      },
+      async loginInput(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: {} } }
+      },
+      async cancelLogin(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: {} } }
+      },
+      async logout(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: {} } }
+      },
+      async oauthStatus(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { providers: [] } } }
+      },
     },
     events: {
       mux: (_request, signal) => stream(muxFrames, signal),

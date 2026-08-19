@@ -12,9 +12,12 @@ import type {
   LlmConfigurableProvider,
   LlmDiscoveredModel,
   LlmFailure,
+  LlmLoginInteraction,
+  LlmLoginResult,
   LlmModelContext,
   LlmModelDiscoveryRequest,
   LlmModelInfo,
+  LlmOAuthStatus,
   LlmResolvedModelInfo,
   LlmProviderInfo,
   ModelModality,
@@ -230,6 +233,35 @@ export abstract class LlmAdapter {
    * @returns the chunk stream, obeying the adapter contract documented on `StreamChunk`.
    */
   abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>
+
+  /**
+   * Run the provider-owned OAuth login flow for one owned route and persist
+   * the returned credential. Absent on adapters whose routes authenticate
+   * through API keys alone; the runtime refuses with `OAUTH_UNSUPPORTED`
+   * before reaching the adapter.
+   * @param provider - one provider route owned by this adapter.
+   * @param interaction - host-owned prompt/notify surface the flow drives.
+   * @returns the outcome the flow disclosed, after the credential is durable.
+   */
+  login?(provider: string, interaction: LlmLoginInteraction): Promise<LlmLoginResult>
+
+  /**
+   * Remove the stored OAuth credential of one owned route. Absent on adapters
+   * whose routes authenticate through API keys alone; the runtime refuses
+   * with `OAUTH_UNSUPPORTED` before reaching the adapter.
+   * @param provider - one provider route owned by this adapter.
+   */
+  logout?(provider: string): Promise<void>
+
+  /**
+   * Report the durable OAuth state of one owned route without refreshing or
+   * contacting the provider. Absent on adapters whose routes authenticate
+   * through API keys alone, and for routes no adapter owns; the runtime
+   * answers `connected: false` for both.
+   * @param provider - one provider route.
+   * @returns the stored-credential status for the route.
+   */
+  oauthStatus?(provider: string): Promise<LlmOAuthStatus>
 }
 
 /**
@@ -565,6 +597,75 @@ export class LlmRuntime extends Service {
    */
   providerRetryPolicy(provider: string): ResolvedRetryPolicy {
     return this.registration(provider).retryPolicy
+  }
+
+  /**
+   * Run the provider-owned OAuth login flow for one registered route and
+   * persist its credential. The flow drives the caller-supplied interaction
+   * and may take minutes; the route must already be registered (an adapter
+   * owns it) for the flow to have a provider to log into.
+   * @param provider - registered provider route whose adapter owns the flow.
+   * @param interaction - host-owned prompt/notify surface the flow drives.
+   * @returns the outcome the flow disclosed, after the credential is durable.
+   * @throws `LlmError` `NO_ADAPTER` for an unknown route, `OAUTH_UNSUPPORTED`
+   *   when the owning adapter has no login flow.
+   */
+  async login(provider: string, interaction: LlmLoginInteraction): Promise<LlmLoginResult> {
+    const adapter = this.registration(provider).adapter
+    if (adapter.login === undefined) {
+      throw new LlmError(`provider "${provider}" does not support OAuth login`, 'OAUTH_UNSUPPORTED')
+    }
+    const result = await adapter.login(provider, interaction)
+    if (result.accountId !== undefined && typeof result.accountId !== 'string') {
+      throw new LlmError(`adapter returned invalid login outcome for provider "${provider}"`, 'INVALID_OAUTH_RESULT')
+    }
+    return result.accountId === undefined ? {} : { accountId: result.accountId }
+  }
+
+  /**
+   * Remove the stored OAuth credential of one registered route.
+   * @param provider - registered provider route whose credential to remove.
+   * @throws `LlmError` `NO_ADAPTER` for an unknown route, `OAUTH_UNSUPPORTED`
+   *   when the owning adapter holds no OAuth credential store.
+   */
+  async logout(provider: string): Promise<void> {
+    const adapter = this.registration(provider).adapter
+    if (adapter.logout === undefined) {
+      throw new LlmError(`provider "${provider}" does not support OAuth logout`, 'OAUTH_UNSUPPORTED')
+    }
+    await adapter.logout(provider)
+  }
+
+  /**
+   * Report the durable OAuth state of one route. A route no adapter owns, or
+   * whose adapter keeps no OAuth credential store, answers `connected: false`
+   * rather than failing: the question is "is there a stored credential", and
+   * an absent owner is a negative answer, not a fault.
+   * @param provider - provider route to inspect.
+   * @returns the stored-credential status for the route.
+   */
+  async oauthStatus(provider: string): Promise<LlmOAuthStatus> {
+    const registration = this.adapters.get(provider)
+    if (registration === undefined || registration.adapter.oauthStatus === undefined) {
+      return { provider, connected: false }
+    }
+    const status = await registration.adapter.oauthStatus(provider)
+    if (status.provider !== provider || typeof status.connected !== 'boolean') {
+      throw new LlmError(`adapter returned invalid OAuth status for provider "${provider}"`, 'INVALID_OAUTH_STATUS')
+    }
+    if (status.accountId !== undefined && typeof status.accountId !== 'string') {
+      throw new LlmError(`adapter returned invalid OAuth status for provider "${provider}"`, 'INVALID_OAUTH_STATUS')
+    }
+    if (status.expiresAt !== undefined
+      && (!Number.isFinite(status.expiresAt) || status.expiresAt <= 0)) {
+      throw new LlmError(`adapter returned invalid OAuth status for provider "${provider}"`, 'INVALID_OAUTH_STATUS')
+    }
+    return {
+      provider,
+      connected: status.connected,
+      ...status.accountId === undefined ? {} : { accountId: status.accountId },
+      ...status.expiresAt === undefined ? {} : { expiresAt: status.expiresAt },
+    }
   }
 
   /** Detach typed adapter-owned modality metadata. */

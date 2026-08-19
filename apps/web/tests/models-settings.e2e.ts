@@ -32,6 +32,7 @@ const DECLARED_EXPECTED = join(SNAPSHOT_DIR, 'declared.expected.md')
 const DECLARED_EDIT_EXPECTED = join(SNAPSHOT_DIR, 'declared-edit.expected.md')
 const NATIVE_DELETE_EXPECTED = join(SNAPSHOT_DIR, 'native-delete.expected.md')
 const DELETE_EXPECTED = join(SNAPSHOT_DIR, 'delete.expected.md')
+const OAUTH_CARD_EXPECTED = join(SNAPSHOT_DIR, 'oauth-card.expected.md')
 const MODE = webSnapshotMode()
 
 describe('web e2e: Models settings page configures a dormant provider', () => {
@@ -79,6 +80,32 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     await dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).waitFor({ timeout: 10_000 })
     const snapshot = await captureStableAria(page, '[role="dialog"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(EMPTY_EXPECTED, snapshot, MODE)
+  }, 60_000)
+
+  it('renders the login card for the OAuth-authenticated Codex route', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-models-oauth'))
+    const dialog = page.getByRole('dialog', { name: '设置' })
+    const add = dialog.getByRole('button', { name: '添加提供方' })
+    const pick = dialog.getByLabel('提供方')
+    // The scenario shares one page: the previous step may have left the add
+    // card open, so only open it when it is not.
+    if (await pick.count() === 0) {
+      await add.waitFor({ timeout: 10_000 })
+      await add.click()
+    }
+    await pick.waitFor({ timeout: 10_000 })
+    // The directory offers the OAuth-only catalog route; the page renders its
+    // login card, never a key field. The flow itself is not started: it would
+    // drive the host's browser and a real OpenAI authorization.
+    await pick.selectOption('openai-codex')
+    await dialog.getByRole('button', { name: '登录 OpenAI 账号' }).waitFor({ timeout: 10_000 })
+    expect(await dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).count()).toBe(0)
+    const snapshot = await captureStableAria(page, '[role="dialog"]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(OAUTH_CARD_EXPECTED, snapshot, MODE)
+    // Leave the card where the next step expects it: the key editor for the
+    // provider the first step selected.
+    await pick.selectOption('minimax-cn')
+    await dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).waitFor({ timeout: 10_000 })
   }, 60_000)
 
   it('refuses a key no HTTP header can carry before anything is written', async () => {
@@ -280,7 +307,7 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
   it.skipIf(MODE === 'record')('keeps the fixture inventory closed', async () => {
     await assertFixtureInventory(SNAPSHOT_DIR, [
       'configured.expected.md', 'declared-edit.expected.md', 'declared.expected.md',
-      'delete.expected.md', 'empty.expected.md', 'native-delete.expected.md',
+      'delete.expected.md', 'empty.expected.md', 'native-delete.expected.md', 'oauth-card.expected.md',
     ])
   })
 })

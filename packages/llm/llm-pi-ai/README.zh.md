@@ -150,6 +150,14 @@ profile 的 `models` 列表是*替换*该路由已安装 catalog，而不是扩�
 - pi-ai 的 `off` 思考级别会原样穿过 Harness 能力 seam，并在分派时变为被省略的 pi-ai 通用 `reasoning` 选项。
 - `GenerateOptions.stop` 会以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式输出接口无法保证所有提供方都支持它。
 
+## OAuth 账号登录
+
+仅以 OAuth 认证的已安装 catalog 提供方——`openai-codex`，使用 ChatGPT（Plus/Pro）账号对接 `chatgpt.com/backend-api`——靠登录而非密钥来配置。模型页为该路由提供登录卡片；Web 宿主运行提供方自己的流程（带本地回调的浏览器授权，或设备码），在流程索要授权页的那一刻用系统浏览器打开它，把步骤转发给页面，并把返回的凭据持久化到仅属主的文档 `$DSH_HOME/.oauth.json`（每个提供方路由一条凭据，0600 权限）。该路由的 profile 是一个无引用的 `{}`：请求从该文档解析凭据，走的是登录时写入的同一个 pi-ai store，首次使用时在 store 锁内刷新已过期的 access token。
+
+本机若已通过 **codex-cli** 登录 ChatGPT（`~/.codex/auth.json` 中 `auth_mode: chatgpt`），即视为已绑定：路由在首次使用时采纳这份登录——拷贝进 OAuth 文档，此后由 store 独立持有并刷新——模型页无需任何流程即可显示该账号。退出登录会持久屏蔽 codex 来源（文档中写入 `null` 条目），因此「退出登录」之后不会再次自动采纳，直到真正登录一次。由于采纳的副本独立刷新，在 DSH 与 codex-cli 之间交替使用可能轮换共享的 refresh token；若此后请求失败，退出登录再登录一次即可恢复。`oauthCodexHome` 用于在 codex 状态位于别处时指定采纳所读取的 OS home。
+
+登录流程经由 `llm` seam 暴露（`login`、`logout`、`oauthStatus` 与 `llm/oauth-event` 宿主事件）；harness 的 OAuth 支持止步于其适配器运行流程的路由——其他路由上的无密钥 profile 依旧不认证，而完全不点名凭据的 profile 仍由提供方自带的环境发现应答。
+
 ## 应用归因
 
 每个请求都携带 dsh-llm `attributionHeaders()` 的共享归因标头，并通过 pi-ai `headers` 流选项合并。不会合成提供方特定应用归因标头。详见 [dsh-llm § 应用归因](../llm/README.md#app-attribution-attributionts)。
@@ -190,7 +198,7 @@ pi-ai 事件会变为 harness 推理、文本、工具调用、usage 与 finish 
 
 ## 已知限制与暂缓事项
 
-- **仅以 OAuth 认证的提供方不予提供**：pi-ai 的 OAuth 只从*已存储*的 OAuth 凭据解析，而本适配器构造 `Models` 集合时不注入凭据存储、也不运行登录流程，因此这类路由的每个请求都会在发出之前以 `Provider is not configured` 失败。可配置提供方目录因此不列出它们；已安装 catalog 中只有 `openai-codex` 属于此类。settings 文档已经写过的路由仍保留目录条目，配置界面据此可以编辑或删除；`apiKeyEnv` 也仍能用该密钥完成认证——对 Codex 而言那是一个会过期、且这里没有任何环节会去刷新的 token。
+- **OAuth 路由刷新的是 token，不是登录**：refresh token 已失效（例如 ChatGPT 账号被吊销）时，请求会以提供方自己的错误失败；已存凭据保留用于诊断，重新登录会替换它。这里没有任何环节会带外监控吊销。
 - **提供方自带的凭据发现只读进程环境**：不指定凭据的路由交由 catalog 提供方自行解析，而它探测的是环境变量（`AZURE_OPENAI_API_KEY`、`AWS_PROFILE`、`AWS_ACCESS_KEY_ID` 以及各提供方自己的那一组）。它不读任何本地凭据目录，因此只有 `~/.aws/credentials` 而未导出 `AWS_PROFILE` 会被解析为未配置；由 harness 凭据 seam 保管的值，除非进程环境里也有，否则对它不可见。
 - **settings 能新增或覆盖路由，但不能移除组合路由**：用户层合并在组合 `base` 之上，因此删除 `cordis.yml` 提供的提供方属于组合变更；对该 namespace 执行 `replace` 只会重置用户层。
 - **分层合并对字典键没有删除语义**：settings seam 把组合 `base` 与用户层按键递归合并，因此 base 声明的某个 `reasoningEfforts` 档位、`modelOverrides` 条目或 `compat` 字段，用户层只能覆盖、无法移除——而 `reasoningEfforts` 里缺席本身*就是*语义（「不提供」），于是 base 声明过的档位会一直被提供。只有 `cordis.yml` entry config 为用户层正在编辑的同一模型声明了按模型推理字段才会触发；受支持的姿态是把这些字段留给 settings 文档（shipped 组合以 dormant 方式挂载该适配器），且 `models` 列表是数组、整体替换，这是带内的解决办法。

@@ -116,6 +116,15 @@ const PRIVILEGED_METHODS = new Set([
   'credentials.set',
   'credentials.unset',
   'llm.discoverModels',
+  // The OAuth plane mutates the stored credential store and drives host
+  // network/browser activity, so it is configuration-plane work like the
+  // settings and credential domains; reading login state is equally
+  // privileged reconnaissance.
+  'llm.login',
+  'llm.loginInput',
+  'llm.cancelLogin',
+  'llm.logout',
+  'llm.oauthStatus',
 ])
 
 /**

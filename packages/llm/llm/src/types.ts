@@ -21,6 +21,16 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'llm/adapters-updated'(): void
+    /**
+     * One OAuth login-flow step for one provider route: a progress or prompt
+     * event the host's login interaction relayed, for surfaces to display and,
+     * for the `manual_code` variant, to answer through
+     * {@link LlmRuntime.loginInput}. Payloads are JSON-safe by construction.
+     * @param provider - the provider route whose flow produced the event.
+     * @param event - the flow step.
+     * @mode emit
+     */
+    'llm/oauth-event'(provider: string, event: LlmOAuthEvent): void
   }
 }
 
@@ -184,6 +194,93 @@ export interface LlmConfigurableProvider {
    * from outside.
    */
   declared?: boolean
+  /**
+   * The authentication method the route's adapter resolves, when the adapter
+   * states one. `oauth` marks a route whose provider authenticates through a
+   * stored OAuth credential obtained by a login flow (a ChatGPT account, for
+   * instance) rather than an API key, so configuration surfaces can render
+   * the right setup affordance. Absent means the adapter draws no such
+   * distinction and the surface defaults to its key posture.
+   */
+  auth?: 'api_key' | 'oauth'
+}
+
+/**
+ * One prompt a login flow addresses to its host. `select` asks for an option
+ * id; `manual_code` asks the user to paste an authorization code or redirect
+ * URL after completing login in a browser; `text` and `secret` ask for a
+ * free-form or hidden value.
+ */
+export type LlmLoginPrompt = {
+  signal?: AbortSignal
+} & (
+    | {
+      type: 'select'
+      message: string
+      options: readonly { id: string; label: string; description?: string }[]
+    }
+    | { type: 'text' | 'secret' | 'manual_code'; message: string; placeholder?: string }
+  )
+
+/**
+ * One login-flow progress event, JSON-safe for host-to-client forwarding.
+ * `auth_url` invites the user to complete login in a browser; `device_code`
+ * shows a code to enter at the verification URI; `manual_code` opens a prompt
+ * the host should surface for the user to paste the authorization code or
+ * redirect URL into; `complete` announces the flow finished.
+ */
+export type LlmOAuthEvent =
+  | { type: 'info'; message: string; links?: readonly { url: string; label?: string }[] }
+  | { type: 'auth_url'; url: string; instructions?: string }
+  | {
+    type: 'device_code'
+    userCode: string
+    verificationUri: string
+    intervalSeconds?: number
+    expiresInSeconds?: number
+  }
+  | { type: 'progress'; message: string }
+  | { type: 'manual_code'; message: string; placeholder?: string }
+  | { type: 'complete'; accountId?: string }
+  | { type: 'error'; message: string }
+
+/**
+ * Host-side interaction surface a login flow drives: the flow asks the host
+ * to answer prompts (auto-answer, forward to a user, or refuse) and to relay
+ * progress events to whatever surface started it. Structural mirror of the
+ * interaction pi-ai's OAuth flows drive, so an adapter passes one through
+ * without translation.
+ */
+export interface LlmLoginInteraction {
+  /** Abort the whole flow; implementations reject their pending prompt. */
+  signal?: AbortSignal
+  /** Answer one prompt; rejects on cancellation or when the host cannot answer. */
+  prompt(prompt: LlmLoginPrompt): Promise<string>
+  /** Relay one progress event. */
+  notify(event: LlmOAuthEvent): void
+}
+
+/** The outcome of a completed login flow. */
+export interface LlmLoginResult {
+  /** Provider-side account identifier disclosed by the flow, when it has one. */
+  accountId?: string
+}
+
+/**
+ * Durable OAuth state of one provider route, for status surfaces: whether a
+ * credential is stored, and what the stored credential discloses. Whether the
+ * credential still *works* is only answerable at request time (token refresh
+ * happens under the provider lock on the first request that needs it).
+ */
+export interface LlmOAuthStatus {
+  /** Provider route the status answers for. */
+  provider: string
+  /** Whether the adapter holds a stored OAuth credential for the route. */
+  connected: boolean
+  /** Provider-side account identifier disclosed by the login flow. */
+  accountId?: string
+  /** Epoch milliseconds at which the stored access token expires. */
+  expiresAt?: number
 }
 
 /**

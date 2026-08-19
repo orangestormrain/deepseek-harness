@@ -1602,6 +1602,8 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   let approvalPending = true
   const pendingQuestionRpcId = mint()
   let questionPending = true
+  /** Fixture OAuth state for the models page login card; login/logout toggle it. */
+  let fixtureOAuthConnected = false
   const fixtureQuestions: Extract<MuxFrame, { type: 'question/requested' }>['questions'] = [
     {
       id: 'harness-profile',
@@ -2506,6 +2508,46 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         }
         return ok(request, { accepted: true as const })
       },
+      delete: (request) => {
+        const { sessionId } = request.payload
+        if (!archivedSessionIds.includes(sessionId)) {
+          return err(request, {
+            code: 'session-not-archived',
+            message: `fixture session ${sessionId} is not archived`,
+            details: { sessionId },
+          })
+        }
+        const descendants: SessionId[] = []
+        const collect = (parentId: SessionId): void => {
+          for (const child of sessions.filter(candidate => candidate.parentSessionId === parentId)) {
+            collect(child.sessionId)
+            descendants.push(child.sessionId)
+          }
+        }
+        collect(sessionId)
+        if (descendants.length > 0 && request.payload.recursive !== true) {
+          return err(request, {
+            code: 'session-has-descendants',
+            message: `fixture session ${sessionId} has descendants`,
+            details: { sessionId, descendantSessionIds: descendants },
+          })
+        }
+        const deletedSessionIds = request.payload.recursive === true ? [...descendants, sessionId] : [sessionId]
+        for (const id of deletedSessionIds) {
+          const index = sessions.findIndex(candidate => candidate.sessionId === id)
+          if (index >= 0) sessions.splice(index, 1)
+          logs.delete(id)
+          modelSelections.delete(id)
+          const archived = archivedSessionIds.indexOf(id)
+          if (archived >= 0) archivedSessionIds.splice(archived, 1)
+          for (const workspace of workspaces) {
+            workspace.sessionIds = workspace.sessionIds.filter(candidate => candidate !== id)
+          }
+          emitHost({ type: 'host/session-removed', sessionId: id })
+        }
+        emitHost({ type: 'host/archived-sessions-changed', archivedSessionIds: [...archivedSessionIds] })
+        return ok(request, { deletedSessionIds })
+      },
     },
     subagents: {
       list: request => ok(request, { entries: [], parentAvailable: true }),
@@ -2690,6 +2732,15 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         const { sessionId } = request.payload
         if (!archivedSessionIds.includes(sessionId)) {
           archivedSessionIds.push(sessionId)
+          emitHost({ type: 'host/archived-sessions-changed', archivedSessionIds: [...archivedSessionIds] })
+        }
+        return ok(request, { archivedSessionIds: [...archivedSessionIds] })
+      },
+      unarchiveSession: (request) => {
+        const { sessionId } = request.payload
+        const index = archivedSessionIds.indexOf(sessionId)
+        if (index >= 0) {
+          archivedSessionIds.splice(index, 1)
           emitHost({ type: 'host/archived-sessions-changed', archivedSessionIds: [...archivedSessionIds] })
         }
         return ok(request, { archivedSessionIds: [...archivedSessionIds] })
@@ -2947,11 +2998,14 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
       providers: request => ok(request, {
         providers: [
           { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [], active: true },
-          { provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'], active: true, declared: false },
-          { provider: 'anthropic', displayName: 'anthropic', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'anthropic'], active: false, declared: false },
+          { provider: 'openai', displayName: 'openai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'], active: true, declared: false, auth: 'api_key' },
+          { provider: 'anthropic', displayName: 'anthropic', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'anthropic'], active: false, declared: false, auth: 'api_key' },
           // One hand-declared route, so a surface reading this fixture meets
           // the tagged shape rather than only the shipped one.
-          { provider: 'acme-gateway', displayName: 'Acme Gateway', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme-gateway'], active: true, declared: true },
+          { provider: 'acme-gateway', displayName: 'Acme Gateway', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme-gateway'], active: true, declared: true, auth: 'api_key' },
+          // One OAuth route, so a surface reading this fixture meets the
+          // login-card shape rather than only the key shape.
+          { provider: 'openai-codex', displayName: 'OpenAI Codex', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai-codex'], active: true, declared: false, auth: 'oauth' },
         ],
       }),
       models: request => ok(request, { groups: fixtureModelGroups(), failures: [] }),
@@ -2961,6 +3015,39 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
       discoverModels: request => ok(request, {
         models: fixtureModelGroups().flatMap(group => group.models.map(model => ({ id: model.id, name: model.name }))),
       }),
+      // Fixture OAuth state: one credential store and one recorded event log,
+      // so surfaces can exercise the login card against settled answers.
+      oauthStatus: (request) => {
+        const requested = request.payload.provider
+        const providers = requested === undefined
+          ? [{ provider: 'openai-codex' }]
+          : [{ provider: requested }]
+        return ok(request, {
+          providers: providers.map(({ provider }) => provider === 'openai-codex' && fixtureOAuthConnected
+            ? { provider, connected: true, accountId: 'acct-fixture' }
+            : { provider, connected: false }),
+        })
+      },
+      login: (request): Promise<RpcResponse<{}>> => {
+        if (request.payload.provider !== 'openai-codex') {
+          return Promise.resolve(err<{ provider: string }, {}>(request, {
+            code: 'oauth-unknown-provider', message: `no configurable provider "${request.payload.provider}" is declared`,
+            details: { provider: request.payload.provider },
+          }))
+        }
+        fixtureOAuthConnected = true
+        emitHost({ type: 'host/remote-event', event: 'llm/oauth-event', args: [
+          'openai-codex',
+          { type: 'complete', accountId: 'acct-fixture' },
+        ] })
+        return ok(request, {})
+      },
+      loginInput: request => ok(request, {}),
+      cancelLogin: request => ok(request, {}),
+      logout: (request) => {
+        fixtureOAuthConnected = false
+        return ok(request, {})
+      },
     },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
@@ -3089,6 +3176,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'session.attachment': return this.api.sessions.attachment(request)
       case 'session.updateQueue': return this.api.sessions.updateQueue(request)
       case 'session.cancel': return this.api.sessions.cancel(request)
+      case 'session.delete': return this.api.sessions.delete(request)
       case 'subagent.list': return this.api.subagents.list(request)
       case 'subagent.history': return this.api.subagents.history(request)
       case 'subagent.prompt': return this.api.subagents.prompt(request, signal)
@@ -3105,6 +3193,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'workspace.insertBefore': return this.api.workspace.insertBefore(request)
       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
+      case 'workspace.unarchiveSession': return this.api.workspace.unarchiveSession(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)
@@ -3129,6 +3218,11 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.providers': return this.api.llm.providers(request)
       case 'llm.models': return this.api.llm.models(request)
       case 'llm.discoverModels': return this.api.llm.discoverModels(request, signal)
+      case 'llm.login': return this.api.llm.login(request)
+      case 'llm.loginInput': return this.api.llm.loginInput(request)
+      case 'llm.cancelLogin': return this.api.llm.cancelLogin(request)
+      case 'llm.logout': return this.api.llm.logout(request)
+      case 'llm.oauthStatus': return this.api.llm.oauthStatus(request)
     }
   }
 

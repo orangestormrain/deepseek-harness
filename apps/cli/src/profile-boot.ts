@@ -18,6 +18,7 @@ import { FiberState, type Context } from '@deepseek-ai/cordis'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import {
+  applySystemProxy,
   boot,
   composeEntries,
   healProfilesModuleFallback,
@@ -205,6 +206,11 @@ function suppressShutdownError(ctx: Context, signal: AbortSignal, error: unknown
  * @returns the settled root context and the shutdown controller.
  */
 export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Context; shutdown: ProcessShutdown }> {
+  // The system proxy is a boot fact, not a plugin concern: Node's fetch
+  // ignores it, so every outbound call (ChatGPT OAuth refresh included)
+  // would otherwise go out proxy-less on a machine whose browser and native
+  // CLIs all route through the local proxy.
+  applySystemProxy()
   const composed = composeProfile(options.profile, options.patchFiles)
   const app: { current?: Context } = {}
   const shutdown = createProcessShutdown(async () => { await app.current?.fiber.dispose() })

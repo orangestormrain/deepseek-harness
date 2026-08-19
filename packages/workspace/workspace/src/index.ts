@@ -255,6 +255,50 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * Restore one archived session to grouping surfaces. The workspace account
+   * was retained by archive, so removing the global-set member restores the
+   * original position. A non-archived id is an idempotent no-op.
+   * @param sessionId - Session identity to restore.
+   */
+  unarchiveSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      const state = this.requireState()
+      if (!state.archivedSessionIds.includes(sessionId)) return
+      await this.setState({
+        ...state,
+        archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
+      })
+    })
+  }
+
+  /**
+   * Remove deleted session identities from the archive set, header index, and
+   * every Workspace account. Durable session deletion commits before this
+   * cleanup; stale account ids remain safely filtered if a later domain write
+   * fails and are pruned on the next successful mutation.
+   * @param sessionIds - Permanently deleted session identities.
+   */
+  forgetSessions(sessionIds: readonly SessionId[]): Promise<void> {
+    return this.enqueueOperation(async () => {
+      if (sessionIds.length === 0) return
+      const removed = new Set(sessionIds)
+      for (const id of removed) {
+        this.headers.delete(id)
+        this.sessionPaths.delete(id)
+        this.invalidSessionPaths.delete(id)
+      }
+      for (const entity of this.entities.values()) {
+        for (const id of removed) await entity.detachSession(id)
+      }
+      const state = this.requireState()
+      const archivedSessionIds = state.archivedSessionIds.filter(id => !removed.has(id))
+      if (!sameSessionIds(archivedSessionIds, state.archivedSessionIds)) {
+        await this.setState({ ...state, archivedSessionIds })
+      }
+    })
+  }
+
+  /**
    * Whether a session is live, header-indexed, or present in a fresh
    * persistence listing. Only a definite miss returns false — a failing
    * `sessionPersistence.list()` propagates so storage faults never
