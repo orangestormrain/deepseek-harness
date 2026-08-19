@@ -30,7 +30,7 @@ OpenRouter 应用归属刻意未实现。`HTTP-Referer`、`X-OpenRouter-Title`�
 
 提供方无关的身份由 `dsh-llm`（`packages/llm/llm/src/attribution.ts`）拥有，而非各适配器。`AppIdentity` 仅包含构建 `User-Agent` 所需的公开产品事实，默认的 `APP_IDENTITY` 取值如下：
 
-- `User-Agent` 的产品 token：`deepseek-harness`（与 Agent Note 之前的线路值及仓库/组织身份保持连续性）
+- `User-Agent` 的产品 token：`deepseek-harness-local`（与 Agent Note 之前的线路值及仓库/组织身份保持连续性）
 - 版本：通过 `createRequire` 从所属包的 manifest（元数据清单）读取，绝不手动复制常量
 - 应用 URL：`https://github.com/deepseek-ai/deepseek-harness`——仓库主页
 
@@ -71,7 +71,7 @@ OpenRouter 应用归属刻意未实现。`HTTP-Referer`、`X-OpenRouter-Title`�
 
 **仅配置启用的归属。** 否决。默认关闭的设置正是适配器不断漂移的原因。策略是强制默认归属加可覆盖的公开值，而非可选归属。
 
-**以 SDK 命名的 token（`deepseek-harness-sdk`）。** 曾考虑用于 `User-Agent` token，因为受支持的运行时客户端栈使用 SDK 名称。`deepseek-harness` 胜出，因为它命名 DeepSeek Harness 产品、与组织／仓库身份和包 scope 一致，并且在不把完整产品称为 SDK 的前提下保持线路归属稳定。
+**以 SDK 命名的 token（`deepseek-harness-sdk`）。** 曾考虑用于 `User-Agent` token，因为受支持的运行时客户端栈使用 SDK 名称。`deepseek-harness-local` 胜出，因为它命名 DeepSeek Harness 产品、与组织／仓库身份和包 scope 一致，并且在不把完整产品称为 SDK 的前提下保持线路归属稳定。
 
 ## 后果
 
