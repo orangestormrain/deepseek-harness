@@ -597,7 +597,7 @@ describe('fork', () => {
 describe('permanent deletion', () => {
   it('forwards recursive deletion and removes every committed id immediately', async () => {
     const b = bench()
-    await feedList(b, [{ id: 'root' }, { id: 'child', parentSessionId: sid('root') }])
+    await feedList(b, [{ id: 'root' }, { id: 'child', parentId: 'root' }])
     b.api.onSessionDelete = () => Promise.resolve(ok({
       deletedSessionIds: [sid('child'), sid('root')],
     }))

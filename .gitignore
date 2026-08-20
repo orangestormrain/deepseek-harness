@@ -39,3 +39,4 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 /官方仓库/
+/awesome-dsh-plugin/
